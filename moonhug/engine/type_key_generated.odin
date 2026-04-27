@@ -26,6 +26,7 @@ TypeKey :: enum u16 {
 	TweenRotateToLocal,
 	TweenScaleToLocal,
 	TweenUnion,
+	string,
 }
 
 INVALID_TYPE_KEY :: TypeKey(max(u16))
@@ -52,3 +53,4 @@ TweenMoveToLocal__Guid := uuid.read("da9d301a-66a3-450c-8c0b-8c696ad60b0b") or_e
 TweenRotateToLocal__Guid := uuid.read("b72f3c1a-9e45-4b8d-a3f7-2d1e5c8f0b94") or_else UUID_NIL
 TweenScaleToLocal__Guid := uuid.read("aa1970c6-51d2-4d27-9dc8-718ad1e51160") or_else UUID_NIL
 TweenUnion__Guid := uuid.read("a243efe5-6e34-4d1c-886c-83928685df48") or_else UUID_NIL
+string__Guid := uuid.read("c4f0a1b2-3d5e-6f7a-8b9c-0d1e2f3a4b5c") or_else UUID_NIL

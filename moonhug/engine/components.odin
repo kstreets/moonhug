@@ -85,12 +85,12 @@ type_cleanup :: proc(key: TypeKey, ptr: rawptr) {
 	if fn := type_cleanup_procs[key]; fn != nil do fn(ptr)
 }
 
-// TODO remove after type_cleanup covers string type
-field_cleanup :: proc(tid: typeid, ptr: rawptr) {
-	if tid == typeid_of(string) {
-		delete((cast(^string)ptr)^)
-		return
-	}
+@(cleanup={type=string, priority=0})
+type_cleanup_string_field :: proc(s: ^string) {
+	delete(s^)
+}
+
+type_cleanup_by_typeid :: proc(tid: typeid, ptr: rawptr) {
 	if key, ok := get_type_key_by_typeid(tid); ok {
 		type_cleanup(key, ptr)
 	}

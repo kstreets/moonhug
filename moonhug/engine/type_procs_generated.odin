@@ -11,4 +11,5 @@ __type_resets_init :: proc() {
 
 __type_cleanups_init :: proc() {
 	type_cleanup_procs[.Player] = proc(ptr: rawptr) { cleanup_Player(cast(^Player)ptr) }
+	type_cleanup_procs[.string] = proc(ptr: rawptr) { type_cleanup_string_field(cast(^string)ptr) }
 }

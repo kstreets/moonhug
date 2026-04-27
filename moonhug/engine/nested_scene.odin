@@ -624,7 +624,7 @@ nested_scene_revert_override :: proc(ns: ^NestedScene, target_id: Local_ID, prop
                                 if field_bytes, merr := json.marshal(base_field_json, {spec = .JSON}); merr == nil {
                                     defer delete(field_bytes)
                                     fmt.printf("[revert] applying base bytes: %s\n", field_bytes)
-                                    field_cleanup(live_tid, live_ptr)
+                                    type_cleanup_by_typeid(live_tid, live_ptr)
                                     if ptr_tid, ptr_ok := get_pointer_typeid_by_typeid(live_tid); ptr_ok {
                                         umerr := json.unmarshal_any(field_bytes, any{&live_ptr, ptr_tid})
                                         fmt.printf("[revert] unmarshal err=%v\n", umerr)

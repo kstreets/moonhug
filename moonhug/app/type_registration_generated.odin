@@ -32,6 +32,7 @@ register_type_guids :: proc() {
 		engine.register_type(engine.TweenRotateToLocal, engine.TweenRotateToLocal__Guid)
 		engine.register_type(engine.TweenScaleToLocal, engine.TweenScaleToLocal__Guid)
 		engine.register_type(engine.TweenUnion, engine.TweenUnion__Guid)
+		engine.register_type(string, engine.string__Guid)
 		engine.register_type_key(engine.A, engine.TypeKey.A)
 		engine.register_type_key(engine.AudioSettings, engine.TypeKey.AudioSettings)
 		engine.register_type_key(engine.B, engine.TypeKey.B)
@@ -53,5 +54,6 @@ register_type_guids :: proc() {
 		engine.register_type_key(engine.TweenRotateToLocal, engine.TypeKey.TweenRotateToLocal)
 		engine.register_type_key(engine.TweenScaleToLocal, engine.TypeKey.TweenScaleToLocal)
 		engine.register_type_key(engine.TweenUnion, engine.TypeKey.TweenUnion)
+		engine.register_type_key(string, engine.TypeKey.string)
 	})
 }

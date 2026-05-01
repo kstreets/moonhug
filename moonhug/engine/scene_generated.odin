@@ -9,6 +9,7 @@ SceneFile :: struct {
 	next_local_id: Local_ID,
 	transforms:    [dynamic]Transform,
 	nested_scenes: [dynamic]NestedScene,
+	breadcrumbs:   [dynamic]Breadcrumb,
 	cameras: [dynamic]Camera,
 	lifetimes: [dynamic]Lifetime,
 	players: [dynamic]Player,
@@ -16,7 +17,7 @@ SceneFile :: struct {
 	sprite_renderers: [dynamic]SpriteRenderer,
 }
 
-_scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^Scene = nil) -> Transform_Handle {
+_scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^Scene = nil, transform_scope_guid: Asset_GUID = {}, skip_scene_local_id_registration := false) -> Transform_Handle {
 	w := ctx_world()
 
 	id_to_transform_handle := make(map[Local_ID]Handle, context.temp_allocator)
@@ -27,6 +28,7 @@ _scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^
 	id_to_sprite_renderer_handle := make(map[Local_ID]Handle, context.temp_allocator)
 
 	if s != nil {
+		scene_file_remap_merge_metadata(sf, s)
 		for &ns_data in sf.nested_scenes {
 			ns_copy := ns_data
 			ns_copy.overrides = make([dynamic]Override, len(ns_data.overrides))
@@ -87,6 +89,13 @@ _scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^
 		handle.type_key = .Transform
 		t^ = t_data
 		t.scene = s
+		if !asset_guid_is_empty(transform_scope_guid) {
+			t.scene_asset_guid = transform_scope_guid
+		} else if s != nil && !asset_guid_is_empty(s.asset_guid) {
+			t.scene_asset_guid = s.asset_guid
+		} else {
+			t.scene_asset_guid = {}
+		}
 		if t.rotation == {0, 0, 0, 0} do t.rotation = QUAT_IDENTITY
 		t_data.name = ""
 		t_data.children = {}
@@ -133,6 +142,34 @@ _scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^
 		}
 	}
 
+	if s != nil {
+		if !skip_scene_local_id_registration {
+			for lid, h in id_to_transform_handle {
+				if _, exists := bimap_get(&s.local_ids, lid); !exists {
+					bimap_insert(&s.local_ids, lid, h)
+				}
+			}
+			for lid, h in id_to_camera_handle {
+				bimap_insert(&s.local_ids, lid, h)
+			}
+			for lid, h in id_to_lifetime_handle {
+				bimap_insert(&s.local_ids, lid, h)
+			}
+			for lid, h in id_to_player_handle {
+				bimap_insert(&s.local_ids, lid, h)
+			}
+			for lid, h in id_to_script_handle {
+				bimap_insert(&s.local_ids, lid, h)
+			}
+			for lid, h in id_to_sprite_renderer_handle {
+				bimap_insert(&s.local_ids, lid, h)
+			}
+		}
+		for bc in sf.breadcrumbs {
+			scene_breadcrumb_put(s, bc)
+		}
+	}
+
 	root_handle: Handle
 	if sf.root != 0 {
 		if h, ok := id_to_transform_handle[sf.root]; ok {
@@ -149,6 +186,10 @@ _scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^
 				append(&p.children, Ref{ pptr=PPtr{local_id = root_t.local_id}, handle = root_handle })
 			}
 		}
+	}
+
+	if s != nil {
+		nested_scene_ensure_host_pegs(s)
 	}
 
 	return Transform_Handle(root_handle)
@@ -171,6 +212,12 @@ _scene_file_remap_local_ids :: proc(sf: ^SceneFile, s: ^Scene) {
 	for &c in sf.scripts { new_id := scene_next_id(s); remap[c.local_id] = new_id; c.local_id = new_id }
 	for &c in sf.sprite_renderers { new_id := scene_next_id(s); remap[c.local_id] = new_id; c.local_id = new_id }
 	for &ns in sf.nested_scenes { new_id := scene_next_id(s); remap[ns.local_id] = new_id; ns.local_id = new_id }
+	for &bc in sf.breadcrumbs {
+		old := bc.local_id
+		new_id := scene_next_id(s)
+		remap[old] = new_id
+		bc.local_id = new_id
+	}
 
 	for &t in sf.transforms {
 		if t.parent.pptr.local_id != 0 {
@@ -193,6 +240,35 @@ _scene_file_remap_local_ids :: proc(sf: ^SceneFile, s: ^Scene) {
 	for &ns in sf.nested_scenes {
 		if new_id, ok := remap[ns.transform_parent]; ok {
 			ns.transform_parent = new_id
+		}
+	}
+
+	for &bc in sf.breadcrumbs {
+		if new_id, ok := remap[bc.scene_instance]; ok {
+			bc.scene_instance = new_id
+		}
+	}
+
+	for &ns in sf.nested_scenes {
+		if ns.host_breadcrumb_id != 0 {
+			if nid, ok := remap[ns.host_breadcrumb_id]; ok {
+				ns.host_breadcrumb_id = nid
+			}
+		}
+	}
+	for &bc in sf.breadcrumbs {
+		if pptr_guid_is_empty(bc.scene_source.guid) {
+			if nid, ok := remap[bc.scene_source.local_id]; ok {
+				bc.scene_source.local_id = nid
+			}
+		}
+	}
+
+	for &ns in sf.nested_scenes {
+		for &ov in ns.overrides {
+			if new_id, ok := remap[ov.target]; ok {
+				ov.target = new_id
+			}
 		}
 	}
 
@@ -222,6 +298,7 @@ scene_file_destroy :: proc(sf: ^SceneFile) {
 		delete(ns.overrides)
 	}
 	delete(sf.nested_scenes)
+	delete(sf.breadcrumbs)
 	for &c in sf.cameras { type_cleanup(.Camera, &c) }
 	delete(sf.cameras)
 	for &c in sf.lifetimes { type_cleanup(.Lifetime, &c) }
@@ -242,6 +319,7 @@ scene_file_destroy_shallow :: proc(sf: ^SceneFile) {
 	}
 	delete(sf.transforms)
 	delete(sf.nested_scenes)
+	delete(sf.breadcrumbs)
 	delete(sf.cameras)
 	delete(sf.lifetimes)
 	delete(sf.players)

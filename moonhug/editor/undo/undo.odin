@@ -552,19 +552,9 @@ _cleanup_before_unmarshal :: proc(ptr: rawptr, tid: typeid) {
 }
 
 scene_find_transform_by_local_id :: proc(s: ^engine.Scene, id: engine.Local_ID) -> (engine.Handle, bool) {
-	if s == nil || id == 0 do return {}, false
-	w := engine.ctx_world()
-	if w == nil do return {}, false
-	for i in 0 ..< len(w.transforms.slots) {
-		slot := &w.transforms.slots[i]
-		if !slot.alive do continue
-		if slot.data.scene != s do continue
-		if slot.data.nested_owned do continue
-		if slot.data.local_id == id {
-			return engine.Handle{index = u32(i), generation = slot.generation, type_key = .Transform}, true
-		}
-	}
-	return {}, false
+	tH, ok := engine.scene_find_outer_transform_local_id(s, id)
+	if !ok do return {}, false
+	return engine.Handle(tH), true
 }
 
 scene_find_component_by_local_id :: proc(s: ^engine.Scene, id: engine.Local_ID) -> (engine.Handle, bool) {

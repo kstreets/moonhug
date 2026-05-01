@@ -1,0 +1,160 @@
+{
+  "root": 10,
+  "next_local_id": 14,
+  "transforms": [
+    {
+      "local_id": 10,
+      "name": "RootB",
+      "is_active": true,
+      "position": [
+        2.00000000,
+        2.00000000,
+        2.00000000
+      ],
+      "rotation": [
+        0.01775163,
+        0.01714255,
+        0.01775163,
+        0.99953789
+      ],
+      "scale": [
+        2.00000000,
+        2.00000000,
+        2.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+        {
+          "pptr": {
+            "local_id": 12,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        },
+        {
+          "pptr": {
+            "local_id": 1,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "components": [
+
+      ]
+    },
+    {
+      "local_id": 12,
+      "name": "TestC",
+      "is_active": true,
+      "position": [
+        3.00000000,
+        3.00000000,
+        3.00000000
+      ],
+      "rotation": [
+        0.02684401,
+        0.02547402,
+        0.02684401,
+        0.99895442
+      ],
+      "scale": [
+        3.00000000,
+        3.00000000,
+        3.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 10,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
+    },
+    {
+      "local_id": 1,
+      "name": "TransformB",
+      "is_active": true,
+      "position": [
+        3.00000000,
+        2.00000000,
+        1.00000000
+      ],
+      "rotation": [
+        0.05377451,
+        0.04170831,
+        0.03709997,
+        0.99699163
+      ],
+      "scale": [
+        9.00000000,
+        8.00000000,
+        7.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 10,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
+    }
+  ],
+  "nested_scenes": [
+    {
+      "local_id": 13,
+      "source_prefab": "ee7d67e6-2c06-41a5-a1f2-3b021b642202",
+      "transform_parent": 12,
+      "host_breadcrumb_id": 14,
+      "sibling_index": 0,
+      "overrides": [
+        {
+          "target": 1,
+          "property_path": "name",
+          "value": "TestC"
+        }
+      ]
+    }
+  ],
+  "breadcrumbs": [
+    {
+      "local_id": 14,
+      "scene_source": {
+        "local_id": 12,
+        "guid": "00000000-0000-0000-0000-000000000000"
+      },
+      "scene_instance": 13
+    }
+  ],
+  "cameras": [
+
+  ],
+  "lifetimes": [
+
+  ],
+  "players": [
+
+  ],
+  "scripts": [
+
+  ],
+  "sprite_renderers": [
+
+  ]
+}

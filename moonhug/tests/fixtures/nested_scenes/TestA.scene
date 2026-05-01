@@ -1,0 +1,278 @@
+{
+  "root": 10,
+  "next_local_id": 17,
+  "transforms": [
+    {
+      "local_id": 10,
+      "name": "RootA",
+      "is_active": true,
+      "position": [
+        1.00000000,
+        1.00000000,
+        1.00000000
+      ],
+      "rotation": [
+        0.00880202,
+        0.00864972,
+        0.00880202,
+        0.99988508
+      ],
+      "scale": [
+        5.00000000,
+        5.00000000,
+        5.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+        {
+          "pptr": {
+            "local_id": 12,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        },
+        {
+          "pptr": {
+            "local_id": 15,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        },
+        {
+          "pptr": {
+            "local_id": 2,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "components": [
+
+      ]
+    },
+    {
+      "local_id": 12,
+      "name": "TestB",
+      "is_active": true,
+      "position": [
+        0.00000000,
+        0.00000000,
+        0.00000000
+      ],
+      "rotation": [
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        1.00000000
+      ],
+      "scale": [
+        1.00000000,
+        1.00000000,
+        1.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 10,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
+    },
+    {
+      "local_id": 15,
+      "name": "TestB2",
+      "is_active": true,
+      "position": [
+        0.00000000,
+        0.00000000,
+        0.00000000
+      ],
+      "rotation": [
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        1.00000000
+      ],
+      "scale": [
+        1.00000000,
+        1.00000000,
+        1.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 10,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
+    },
+    {
+      "local_id": 2,
+      "name": "TransformA",
+      "is_active": true,
+      "position": [
+        1.00000000,
+        2.00000000,
+        3.00000000
+      ],
+      "rotation": [
+        0.03709997,
+        0.04170831,
+        0.05377451,
+        0.99699163
+      ],
+      "scale": [
+        7.00000000,
+        8.00000000,
+        9.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 10,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
+    }
+  ],
+  "nested_scenes": [
+    {
+      "local_id": 13,
+      "source_prefab": "2453d7fb-a433-4b0d-8a29-11fc0b491fe4",
+      "transform_parent": 12,
+      "host_breadcrumb_id": 14,
+      "sibling_index": 0,
+      "overrides": [
+        {
+          "target": 10,
+          "property_path": "position",
+          "value": [
+            0.0000000000000000,
+            0.0000000000000000,
+            0.0000000000000000
+          ]
+        },
+        {
+          "target": 10,
+          "property_path": "scale",
+          "value": [
+            1.0000000000000000,
+            1.0000000000000000,
+            1.0000000000000000
+          ]
+        },
+        {
+          "target": 10,
+          "property_path": "name",
+          "value": "TestB"
+        },
+        {
+          "target": 10,
+          "property_path": "rotation",
+          "value": [
+            0.0000000000000000,
+            0.0000000000000000,
+            0.0000000000000000,
+            1.0000000000000000
+          ]
+        }
+      ]
+    },
+    {
+      "local_id": 16,
+      "source_prefab": "2453d7fb-a433-4b0d-8a29-11fc0b491fe4",
+      "transform_parent": 15,
+      "host_breadcrumb_id": 17,
+      "sibling_index": 0,
+      "overrides": [
+        {
+          "target": 10,
+          "property_path": "rotation",
+          "value": [
+            0.0000000000000000,
+            0.0000000000000000,
+            0.0000000000000000,
+            1.0000000000000000
+          ]
+        },
+        {
+          "target": 10,
+          "property_path": "scale",
+          "value": [
+            1.0000000000000000,
+            1.0000000000000000,
+            1.0000000000000000
+          ]
+        },
+        {
+          "target": 10,
+          "property_path": "position",
+          "value": [
+            0.0000000000000000,
+            0.0000000000000000,
+            0.0000000000000000
+          ]
+        },
+        {
+          "target": 10,
+          "property_path": "name",
+          "value": "TestB2"
+        }
+      ]
+    }
+  ],
+  "breadcrumbs": [
+    {
+      "local_id": 14,
+      "scene_source": {
+        "local_id": 12,
+        "guid": "00000000-0000-0000-0000-000000000000"
+      },
+      "scene_instance": 13
+    },
+    {
+      "local_id": 17,
+      "scene_source": {
+        "local_id": 15,
+        "guid": "00000000-0000-0000-0000-000000000000"
+      },
+      "scene_instance": 16
+    }
+  ],
+  "cameras": [
+
+  ],
+  "lifetimes": [
+
+  ],
+  "players": [
+
+  ],
+  "scripts": [
+
+  ],
+  "sprite_renderers": [
+
+  ]
+}

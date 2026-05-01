@@ -9,6 +9,7 @@ Transform_Handle :: distinct Handle
 @(typ_guid={guid = "312927b7-3c4a-4929-9807-8216baf26a68"})
 Transform :: struct {
     local_id: Local_ID `inspect:"-"`,
+    scene_asset_guid: Asset_GUID `json:"-"`,
     name: string,
     is_active: bool,
     destroy: bool `json:"-"`,
@@ -47,6 +48,10 @@ transform_new :: proc(name: string, parentH: Transform_Handle = {}) -> Transform
     if s != nil {
         t.local_id = scene_next_id(s)
         t.scene = s
+        t.scene_asset_guid = s.asset_guid
+    }
+    else {
+        t.local_id = 1
     }
 
     actual_parentH := parentH

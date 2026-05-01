@@ -1,0 +1,100 @@
+{
+  "root": 1,
+  "next_local_id": 3,
+  "transforms": [
+    {
+      "local_id": 1,
+      "name": "RootC",
+      "is_active": true,
+      "position": [
+        3.00000000,
+        3.00000000,
+        3.00000000
+      ],
+      "rotation": [
+        0.02684401,
+        0.02547402,
+        0.02684401,
+        0.99895442
+      ],
+      "scale": [
+        3.00000000,
+        3.00000000,
+        3.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+        {
+          "pptr": {
+            "local_id": 2,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "components": [
+
+      ]
+    },
+    {
+      "local_id": 2,
+      "name": "TransformC",
+      "is_active": true,
+      "position": [
+        7.00000000,
+        8.00000000,
+        9.00000000
+      ],
+      "rotation": [
+        0.00917905,
+        0.01721736,
+        0.02632421,
+        0.99946302
+      ],
+      "scale": [
+        4.00000000,
+        5.00000000,
+        6.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 1,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
+    }
+  ],
+  "nested_scenes": [
+
+  ],
+  "breadcrumbs": [
+
+  ],
+  "cameras": [
+
+  ],
+  "lifetimes": [
+
+  ],
+  "players": [
+
+  ],
+  "scripts": [
+
+  ],
+  "sprite_renderers": [
+
+  ]
+}

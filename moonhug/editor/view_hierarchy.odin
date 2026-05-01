@@ -239,6 +239,11 @@ _draw_hierarchy_node :: proc(tH: engine.Transform_Handle, scene: ^engine.Scene, 
 	t := engine.pool_get(&w.transforms, engine.Handle(tH))
 	if t == nil do return
 
+	sc := scene
+	if t.scene != nil {
+		sc = t.scene
+	}
+
 	has_children := len(t.children) > 0
 	is_selected := _hierarchy_selected == tH
 	is_renaming := _hierarchy_rename_target == tH
@@ -278,7 +283,7 @@ _draw_hierarchy_node :: proc(tH: engine.Transform_Handle, scene: ^engine.Scene, 
 
 	if has_children && im.IsItemToggledOpen() {
 		if im.GetIO().KeyAlt {
-			_populate_alt_open_pending(t, node_open)
+			_populate_alt_open_pending(tH, t, node_open)
 		}
 	}
 	node_rect_min := im.GetItemRectMin()
@@ -315,7 +320,7 @@ _draw_hierarchy_node :: proc(tH: engine.Transform_Handle, scene: ^engine.Scene, 
 		}
 		label_pos := im.Vec2{text_x, node_rect_min.y + im.GetStyle().FramePadding.y}
 		label := t.name
-		if engine.scene_find_nested_scene_for_host(t.scene, tH) != nil {
+		if sc != nil && engine.scene_hierarchy_transform_is_nested_scene_host(sc, tH) {
 			label = strings.concatenate({t.name, "  [nested scene]"}, context.temp_allocator)
 		}
 		im.DrawList_AddText(draw_list, label_pos, text_color, strings.clone_to_cstring(label, context.temp_allocator))
@@ -342,7 +347,7 @@ _draw_hierarchy_node :: proc(tH: engine.Transform_Handle, scene: ^engine.Scene, 
 		}
 		if !is_root && !is_nested {
 			if im.MenuItem("Create Empty Parent", nil, false, true) {
-				_create_empty_parent(tH, scene)
+				_create_empty_parent(tH, sc)
 			}
 		}
 		if im.MenuItem("Rename", nil, false, !is_nested) {
@@ -387,7 +392,7 @@ _draw_hierarchy_node :: proc(tH: engine.Transform_Handle, scene: ^engine.Scene, 
 	}
 
 	if !is_root && !is_nested {
-		_draw_drop_target_on_node(tH, scene, node_rect_min, node_rect_max)
+		_draw_drop_target_on_node(tH, sc, node_rect_min, node_rect_max)
 	}
 
 	if node_open && has_children {
@@ -395,7 +400,9 @@ _draw_hierarchy_node :: proc(tH: engine.Transform_Handle, scene: ^engine.Scene, 
 		copy(children_copy, t.children[:])
 		child_parent_nested := is_nested || t.nested_owned
 		for child in children_copy {
-			_draw_hierarchy_node(engine.Transform_Handle(child.handle), scene, parent_inactive = inactive, parent_nested = child_parent_nested)
+			ch, ok := engine.scene_ref_resolve_transform(sc, child, tH)
+			if !ok do continue
+			_draw_hierarchy_node(ch, sc, parent_inactive = inactive, parent_nested = child_parent_nested)
 		}
 		im.TreePop()
 	}
@@ -619,15 +626,18 @@ _hierarchy_drop_asset_as_child :: proc(path: string, parent_tH: engine.Transform
 }
 
 @(private)
-_populate_alt_open_pending :: proc(t: ^engine.Transform, open: bool) {
+_populate_alt_open_pending :: proc(parent_tH: engine.Transform_Handle, t: ^engine.Transform, open: bool) {
 	w := engine.ctx_world()
+	s := t.scene
+	if s == nil do return
 	for child_ref in t.children {
-		ct := engine.pool_get(&w.transforms, child_ref.handle)
+		ch, ok := engine.scene_ref_resolve_transform(s, child_ref, parent_tH)
+		if !ok do continue
+		ct := engine.pool_get(&w.transforms, engine.Handle(ch))
 		if ct == nil do continue
-		child_tH := engine.Transform_Handle(child_ref.handle)
-		_hierarchy_alt_open_pending[child_tH] = open
+		_hierarchy_alt_open_pending[ch] = open
 		if len(ct.children) > 0 {
-			_populate_alt_open_pending(ct, open)
+			_populate_alt_open_pending(ch, ct, open)
 		}
 	}
 }
@@ -650,7 +660,7 @@ _is_ancestor :: proc(potential_ancestor: engine.Transform_Handle, node: engine.T
 _hierarchy_node_expand :: proc(tH: engine.Transform_Handle, t: ^engine.Transform, deep: bool) {
 	_hierarchy_force_open = tH
 	if deep {
-		_populate_alt_open_pending(t, true)
+		_populate_alt_open_pending(tH, t, true)
 	}
 }
 
@@ -658,7 +668,7 @@ _hierarchy_node_expand :: proc(tH: engine.Transform_Handle, t: ^engine.Transform
 _hierarchy_node_collapse :: proc(tH: engine.Transform_Handle, t: ^engine.Transform, deep: bool) {
 	_hierarchy_alt_open_pending[tH] = false
 	if deep {
-		_populate_alt_open_pending(t, false)
+		_populate_alt_open_pending(tH, t, false)
 	}
 }
 

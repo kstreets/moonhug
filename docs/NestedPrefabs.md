@@ -1,5 +1,7 @@
 # Nested Prefabs WIP Plan
 
+> MoonHug Editor uses scenes as prefabs so prefab is synonym to scene in thid document.
+
 - nested prefabs roadmap:
   - [v] scene tree data model
   - [v] serialization: scene tree file with guid in project
@@ -8,14 +10,14 @@
 
   - prefab instance node type:
     - [v] opaque nested scene, instantiated at gameplay only
-    - [wip] transparent nested scene (metadata for ref and overrides)(no read-only state)
+    - [v] transparent nested scene (metadata for ref and overrides)
+    - breadcrumbs — serialized cross-scene references
+    - deep nested prefabs
 
-  - property overrides: nested scene instance overrides
+  - [v] property overrides: nested scene instance overrides
   - prefab variants
-  
 
 # Design
-> MoonHug Editor uses scenes as prefabs so prefab is synonym to scene here.
 
 ## Scene File Format
 
@@ -26,8 +28,8 @@ SceneFile {
   root:              Local_ID
   next_local_id:     Local_ID
   transforms:        []Transform         // only non-nested-owned nodes
-  nested_scenes:     []NestedScene        // metadata, analogous to Unity PrefabInstance
-  stripped_refs:     []Stripped_Ref      // placeholder anchors for cross-boundary refs
+  nested_scenes:     []NestedScene       // metadata, analogous to Unity PrefabInstance
+  breadcrumbs:       []Breadcrumb        // placeholder anchors for cross-scene refs
   ...components...
 }
 ```
@@ -48,21 +50,35 @@ NestedScene {
 
 `transform_parent == 0` means root — this is how Prefab Variants work in Unity (the base prefab is a `NestedScene` with no parent).
 
-### Stripped_Ref record
+### Breadcrumb record (Analogous to Unity's stripped Transform objects (marked with `stripped` tag))
+Breadcrumb  is the serialized form of a cross-scene Handle reference.
+  - created in scene file for cross-scene references - different referrer source_prefab vs reference source_prefab.
+  - resolved back into a Handle on load.
+  - enough data to load the real object **once**, after resolve breadcrumb is dropped and referrers hold a normal local id / handle.
 
-A lightweight placeholder that appears in the outer file when something needs to reference an object inside a nested prefab:
+
+Rules:
+- Referencing in file should use local_id only
+- When local_id doesn't exist it should be created
+- During serialiation cross-scene references are converted into breadcrumbs
 
 ```
-Stripped_Ref {
-  local_id:                   Local_ID   // file ID in this file
-  corresponding_source_object: Local_ID  // file ID of the object inside the source prefab
-  source_nested_scene:     Local_ID   // local_id of the NestedScene record
+Breadcrumb {
+  local_id:              Local_ID   // local_id referrers will use to refer this element
+  scene_source:          PPtr       // asset guid + local_id in that asset of this element
+  scene_instance:        Local_ID   // scene instance local_id in this file
 }
 ```
 
-Analogous to Unity's stripped Transform objects (marked with `stripped` tag).
+Live scene (post-deserialize):
+- Persisted breadcrumbs live only in `SceneFile`
+- `Scene.local_ids` maps entity `local_id`s to real pool handles (transforms, components, etc.).
+- Resolving a cross-scene reference loads the target if needed, wires the real object, then removes the breadcrumb.
 
 ### Override record
+Override is modification of nested scene target value saved at root scene level
+  - root scene can have overrides for its nested scene references.
+  - when nested — overrides are opaque to parent scene(don't exist any more), nested scene has them already applied when created.
 
 ```
 Override {
@@ -138,8 +154,3 @@ Revert override — discards a specific override on the `NestedScene` record, re
 
 ## Prefab isolation mode
 - show fully colored prefab in grayed out context
-
-## Stripped Refs
-- a lightweight anchor instead of duplicating nested data
-  - required for correct cross-scene-boundary component references
-  - needed when outer scene nodes reference objects inside a nested prefab

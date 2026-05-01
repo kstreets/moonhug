@@ -69,6 +69,18 @@ sm_scene_unload :: proc(scene: ^Scene) {
     }
 }
 
+sm_scene_destroy_or_unload :: proc(scene: ^Scene) {
+	if scene == nil do return
+	scene_manager := ctx_scene_manager()
+	for i in 0 ..< scene_manager.count {
+		if scene_manager.loaded[i] == scene {
+			sm_scene_unload(scene)
+			return
+		}
+	}
+	scene_destroy(scene)
+}
+
 sm_scene_is_valid :: proc(scene: ^Scene) -> bool {
     return scene != nil && scene.generation > 0
 }
@@ -78,7 +90,7 @@ sm_scene_invalidate :: proc(scene: ^Scene) {
     scene.generation = 0
 }
 
-_scene_load_single :: proc(scene_file: ^SceneFile) -> ^Scene {
+_scene_load_single :: proc(scene_file: ^SceneFile, scene_asset_guid: Asset_GUID = {}) -> ^Scene {
     scene_manager := ctx_scene_manager()
     for i in 0..<scene_manager.count {
         if scene_manager.loaded[i] != nil {
@@ -87,13 +99,14 @@ _scene_load_single :: proc(scene_file: ^SceneFile) -> ^Scene {
     }
     scene_manager.count = 0
     scene_manager.active_scene = -1
-    return _scene_load_additive(scene_file)
+    return _scene_load_additive(scene_file, scene_asset_guid)
 }
 
-_scene_load_additive :: proc(scene_file: ^SceneFile) -> ^Scene {
+_scene_load_additive :: proc(scene_file: ^SceneFile, scene_asset_guid: Asset_GUID = {}) -> ^Scene {
     scene_manager := ctx_scene_manager()
     s := scene_new()
     s.next_local_id = scene_file.next_local_id
+    s.asset_guid = scene_asset_guid
 
     root_tH := _scene_load_as_child(scene_file, {}, s)
     if root_tH != {} {
@@ -137,19 +150,23 @@ sm_shutdown :: proc() {
 }
 
 scene_lib_shutdown :: proc() {
-    for _, data in scene_lib {
-        delete(data)
-    }
-    delete(scene_lib)
+	for _, data in scene_lib {
+		delete(data)
+	}
+	delete(scene_lib)
+	scene_lib = make(map[Asset_GUID][]byte)
 }
 
 scene_lib_register :: proc(guid: Asset_GUID) -> bool {
-    path, ok := asset_db_get_path(uuid.Identifier(guid))
-    if !ok do return false
-    data, err := os.read_entire_file(path, context.allocator)
-    if err != nil do return false
-    scene_lib[guid] = data
-    return true
+	if _, ok := scene_lib[guid]; ok {
+		return true
+	}
+	path, ok := asset_db_get_path(uuid.Identifier(guid))
+	if !ok do return false
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil do return false
+	scene_lib[guid] = data
+	return true
 }
 
 scene_instantiate_guid :: proc(guid: Asset_GUID, parent: Transform_Handle) -> Transform_Handle {
@@ -163,5 +180,9 @@ scene_instantiate_guid :: proc(guid: Asset_GUID, parent: Transform_Handle) -> Tr
     sc: ^Scene
     if tr != nil do sc = tr.scene
     _scene_file_remap_local_ids(&sf, sc)
-    return _scene_load_as_child(&sf, parent, sc)
+    root_tH := _scene_load_as_child(&sf, parent, sc, guid)
+    if root_tH != {} {
+        _scene_resolve_nested_in_subtree(root_tH)
+    }
+    return root_tH
 }

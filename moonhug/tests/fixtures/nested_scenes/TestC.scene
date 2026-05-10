@@ -1,6 +1,6 @@
 {
   "root": 1,
-  "next_local_id": 3,
+  "next_local_id": 6,
   "transforms": [
     {
       "local_id": 1,
@@ -33,6 +33,12 @@
         {
           "pptr": {
             "local_id": 2,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        },
+        {
+          "pptr": {
+            "local_id": 3,
             "guid": "00000000-0000-0000-0000-000000000000"
           }
         }
@@ -74,13 +80,63 @@
       "components": [
 
       ]
+    },
+    {
+      "local_id": 3,
+      "name": "TestD",
+      "is_active": true,
+      "position": [
+        0.00000000,
+        0.00000000,
+        0.00000000
+      ],
+      "rotation": [
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        1.00000000
+      ],
+      "scale": [
+        1.00000000,
+        1.00000000,
+        1.00000000
+      ],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 1,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+
+      ],
+      "components": [
+
+      ]
     }
   ],
   "nested_scenes": [
+    {
+      "local_id": 4,
+      "source_prefab": "9d8c54a0-6f5b-4d0e-9b8a-1a2c3d4e5f60",
+      "transform_parent": 3,
+      "host_breadcrumb_id": 5,
+      "sibling_index": 0,
+      "overrides": [
 
+      ]
+    }
   ],
   "breadcrumbs": [
-
+    {
+      "local_id": 5,
+      "scene_source": {
+        "local_id": 3,
+        "guid": "00000000-0000-0000-0000-000000000000"
+      },
+      "scene_instance": 4
+    }
   ],
   "cameras": [
 

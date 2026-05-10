@@ -188,32 +188,153 @@ _collect_nested_owned_subtree :: proc(
 	}
 }
 
-_nested_scene_capture_overrides :: proc(s: ^Scene, ns: ^NestedScene) {
+// Computes the prefab-chain baked base for `ns`: starting from `ns.source_prefab`'s
+// raw, applies each prefab in the chain's NS-for-this-child overrides in order
+// (outermost-first), producing the bytes that represent "what `ns` looks like
+// before any root-scene overrides are applied." Caller owns the returned bytes
+// when ok is true.
+//
+// For native NS (expand_parent == {}) this is just the prefab raw — no chain.
+// For depth-N inner NS, walks N levels of outer prefab files.
+@(private = "file")
+_chain_baked_base_for_ns :: proc(s: ^Scene, ns: ^NestedScene) -> ([]byte, bool) {
+	if s == nil || ns == nil do return nil, false
+
+	prefab_raw, ok := scene_lib[ns.source_prefab]
+	if !ok {
+		if !scene_lib_register(ns.source_prefab) do return nil, false
+		prefab_raw, ok = scene_lib[ns.source_prefab]
+		if !ok do return nil, false
+	}
+
+	clone_raw :: proc(src: []byte) -> []byte {
+		out := make([]byte, len(src))
+		copy(out, src)
+		return out
+	}
+
+	if ns.expand_parent == {} {
+		return clone_raw(prefab_raw), true
+	}
+
+	// Build the chain of (outer_prefab_guid, transform_parent_in_outer) hops
+	// from `ns` outward to root, then walk in reverse (outermost-first) and at
+	// each level apply that level's outer prefab's NS-for-(next inner)
+	// overrides to the next prefab raw. The final result is `ns.source_prefab`
+	// raw with every level's overrides on top.
+	Hop :: struct { outer_guid: Asset_GUID, child_guid: Asset_GUID, child_transform_parent: Local_ID }
+	hops := make([dynamic]Hop, 0, 4, context.temp_allocator)
+
+	cur := ns
+	for _ in 0 ..< 64 {
+		ep := cur.expand_parent
+		if ep == {} do break
+		outer := scene_find_nested_scene_for_host(s, ep)
+		if outer == nil do return nil, false
+		append(&hops, Hop{
+			outer_guid             = outer.source_prefab,
+			child_guid             = cur.source_prefab,
+			child_transform_parent = cur.transform_parent,
+		})
+		cur = outer
+	}
+
+	// Walk hops in reverse (outermost-first). Start with outermost prefab raw,
+	// each iteration extracts the NS-for-child overrides and applies them to
+	// the child prefab raw.
+	cur_raw := prefab_raw  // last iteration produces ns.source_prefab raw + chain mods
+	cur_owns := false
+
+	for i := len(hops) - 1; i >= 0; i -= 1 {
+		hop := hops[i]
+		outer_raw, ohas := scene_lib[hop.outer_guid]
+		if !ohas {
+			if !scene_lib_register(hop.outer_guid) do return nil, false
+			outer_raw, ohas = scene_lib[hop.outer_guid]
+			if !ohas do return nil, false
+		}
+
+		outer_copy := make([]byte, len(outer_raw), context.temp_allocator)
+		copy(outer_copy, outer_raw)
+		outer_sf: SceneFile
+		if json.unmarshal(outer_copy, &outer_sf) != nil do return nil, false
+
+		matching: []Override
+		for &m in outer_sf.nested_scenes {
+			if m.source_prefab != hop.child_guid do continue
+			if m.transform_parent != hop.child_transform_parent do continue
+			matching = m.overrides[:]
+			break
+		}
+
+		child_raw, chas := scene_lib[hop.child_guid]
+		if !chas {
+			if !scene_lib_register(hop.child_guid) {
+				scene_file_destroy(&outer_sf)
+				return nil, false
+			}
+			child_raw, chas = scene_lib[hop.child_guid]
+			if !chas {
+				scene_file_destroy(&outer_sf)
+				return nil, false
+			}
+		}
+
+		baked := nested_scene_apply_overrides(child_raw, matching)
+		baked_owns := raw_data(baked) != raw_data(child_raw)
+		next_buf: []byte
+		if baked_owns {
+			next_buf = baked
+		} else {
+			// no overrides at this level — copy so we own uniformly.
+			next_buf = clone_raw(child_raw)
+		}
+		scene_file_destroy(&outer_sf)
+
+		if cur_owns do delete(cur_raw)
+		cur_raw = next_buf
+		cur_owns = true
+	}
+
+	if !cur_owns do return clone_raw(cur_raw), true
+	return cur_raw, true
+}
+
+// Captures root-scene overrides for `ns` directly into the open scene's root
+// native NS. Diffs `ns`'s prefab-chain-baked base against the live
+// nested-owned subtree; each resulting (target, property_path, value) is
+// emitted onto the **native** NS that owns this chain (with target rewritten
+// to a breadcrumb local_id when `ns` is an inner NS, or kept as the prefab
+// lid when `ns` IS native). Inner-NS records never accumulate overrides under
+// this design — they are runtime artifacts only.
+//
+// Caller is responsible for clearing native_ns.overrides BEFORE the first
+// call across all NS records, and for clearing every NS's overrides AFTER
+// (the inner ones must end up empty so resolve and serialization see a
+// consistent picture).
+@(private = "file")
+_capture_overrides_to_native :: proc(s: ^Scene, ns: ^NestedScene) {
 	w := ctx_world()
-	empty_guid := Asset_GUID{}
-	if ns.source_prefab == empty_guid do return
+	if ns.source_prefab == (Asset_GUID{}) do return
 
 	host_tH := nested_scene_resolve_host_handle(s, ns)
 	if host_tH == {} do return
-
 	host_t := pool_get(&w.transforms, Handle(host_tH))
 	if host_t == nil do return
 
-	base_raw, has_base := scene_lib[ns.source_prefab]
-	if !has_base {
+	prefab_raw, has_prefab := scene_lib[ns.source_prefab]
+	if !has_prefab {
 		if !scene_lib_register(ns.source_prefab) do return
-		base_raw, has_base = scene_lib[ns.source_prefab]
-		if !has_base do return
+		prefab_raw, has_prefab = scene_lib[ns.source_prefab]
+		if !has_prefab do return
 	}
-
-	base_copy := make([]byte, len(base_raw))
-	defer delete(base_copy)
-	copy(base_copy, base_raw)
 
 	prefab_root_id: Local_ID
 	{
+		prefab_copy := make([]byte, len(prefab_raw), context.temp_allocator)
+		copy(prefab_copy, prefab_raw)
 		base_sf: SceneFile
-		if json.unmarshal(base_copy, &base_sf) == nil {
+		if json.unmarshal(prefab_copy, &base_sf) == nil {
 			prefab_root_id = base_sf.root
 			scene_file_destroy(&base_sf)
 		}
@@ -224,28 +345,78 @@ _nested_scene_capture_overrides :: proc(s: ^Scene, ns: ^NestedScene) {
 	_collect_nested_owned_subtree(w, host_tH, &work_sf, prefab_root_id, ns, host_tH)
 	defer scene_file_destroy_shallow(&work_sf)
 
-	opts := json.Marshal_Options{spec = .JSON, pretty = false}
-	work_raw, werr := json.marshal(work_sf, opts)
+	work_raw, werr := json.marshal(work_sf, json.Marshal_Options{spec = .JSON, pretty = false})
 	if werr != nil {
 		fmt.printf("[Scene] Failed to marshal working copy for override capture: %v\n", werr)
 		return
 	}
 	defer delete(work_raw)
 
-	new_overrides := nested_scene_diff_overrides(base_raw, work_raw)
+	base_raw, ok := _chain_baked_base_for_ns(s, ns)
+	if !ok do return
+	defer delete(base_raw)
 
-	// Cleanup: drop overrides whose target local_id no longer exists in the
-	// source prefab. This protects against orphans left when the prefab is
-	// edited to remove the targeted item; nothing in the diff should produce
-	// these, but old saves and merges sometimes do.
-	_drop_overrides_with_missing_targets(&new_overrides, base_raw)
-
-	for &ov in ns.overrides {
-		delete(ov.property_path)
-		json.destroy_value(ov.value)
+	diff := nested_scene_diff_overrides(base_raw, work_raw)
+	defer {
+		// `diff` ownership is transferred into native_ns.overrides (or freed if
+		// any entries are skipped); destroy the dynamic-array shell at end.
+		delete(diff)
 	}
-	delete(ns.overrides)
-	ns.overrides = new_overrides
+
+	_drop_overrides_with_missing_targets(&diff, prefab_raw)
+
+	// Locate the native NS that owns this chain, plus the chain itself for
+	// breadcrumb keying.
+	native_ns: ^NestedScene = ns
+	chain: [dynamic]PPtr = nil
+	if ns.expand_parent != {} {
+		ch, nat_ns, chok := _inner_chain_to_native(s, ns)
+		if !chok || nat_ns == nil {
+			// Couldn't resolve chain — drop diff entries to avoid leaking.
+			for &ov in diff {
+				delete(ov.property_path)
+				json.destroy_value(ov.value)
+			}
+			return
+		}
+		native_ns = nat_ns
+		chain = ch
+	}
+
+	for &ov in diff {
+		target_lid := ov.target
+		if ns.expand_parent != {} {
+			// Deep override: materialize a breadcrumb on the native NS keyed
+			// by the chain + final destination in ns.source_prefab namespace.
+			final_src := PPtr{guid = ns.source_prefab, local_id = ov.target}
+			peg, pok := breadcrumb_create(s, native_ns.local_id, final_src, chain[:])
+			if !pok {
+				delete(ov.property_path)
+				json.destroy_value(ov.value)
+				continue
+			}
+			target_lid = peg
+		}
+
+		// Append on native NS, deduping (target, property_path).
+		dup := false
+		for &existing in native_ns.overrides {
+			if existing.target == target_lid && existing.property_path == ov.property_path {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			delete(ov.property_path)
+			json.destroy_value(ov.value)
+			continue
+		}
+		append(&native_ns.overrides, Override{
+			target        = target_lid,
+			property_path = ov.property_path,
+			value         = ov.value,
+		})
+	}
 }
 
 // Returns the set of local_ids that appear in the prefab base file's section
@@ -318,84 +489,96 @@ _find_ns_by_local_id :: proc(s: ^Scene, ns_local_id: Local_ID) -> (^NestedScene,
 	return nil, false
 }
 
-// Walks `m.expand_parent` up the transform tree until it hits a non-nested-owned
-// transform. That transform is the host of the outermost native NS containing
-// `m` — used to figure out which native NS should carry `m`'s overrides as deep
-// overrides at save time.
-_native_host_for_inner_ns :: proc(s: ^Scene, m: ^NestedScene) -> Transform_Handle {
-	if m.expand_parent == {} do return {}
+// Walks `inner_m`'s ancestry (via expand_parent) and returns the chain of
+// prefab hops from the native NS down to (but not including) `inner_m`'s own
+// hop, plus the native NS itself. The chain is top-down: chain[0] is the
+// hop from the native NS into the next inner level. Each entry is a PPtr
+// (prefab guid, host transform local_id in PARENT prefab namespace).
+@(private = "file")
+_inner_chain_to_native :: proc(s: ^Scene, inner_m: ^NestedScene) -> ([dynamic]PPtr, ^NestedScene, bool) {
+	chain := make([dynamic]PPtr, 0, 4, context.temp_allocator)
+	if inner_m == nil || inner_m.expand_parent == {} do return chain, nil, false
 	w := ctx_world()
-	h := m.expand_parent
-	for _ in 0 ..< 4096 {
-		t := pool_get(&w.transforms, Handle(h))
-		if t == nil do return {}
-		if !t.nested_owned do return h
-		if t.parent.handle == {} do return {}
-		h = Transform_Handle(t.parent.handle)
-	}
-	return {}
-}
 
-// For each inner NS downstream of `n`, allocate a breadcrumb mapping its target
-// local_id (in the inner prefab's namespace) to a fresh outer-bimap local_id
-// and emit the override on `n` with that outer id. The breadcrumb is what lets
-// us reload + reapply: on next load, breadcrumb_get(target) tells the resolver
-// which inner prefab the override is destined for, and where inside it.
-//
-// Currently handles 2-level depth only (outer file → bullet → c.scene). Deeper
-// chains (3+) would require intermediate breadcrumbs the outer file doesn't
-// know how to emit — the inner NS's own deep overrides would need to be
-// preserved, but inner NS records aren't persisted in the outer file. Punt.
-_propagate_deep_overrides_into :: proc(s: ^Scene, n: ^NestedScene) {
-	n_host := nested_scene_resolve_host_handle(s, n)
-	if n_host == {} do return
+	// Walk: append `inner_m`'s OWN hop first, then walk up adding each
+	// outer inner_m's hop. Stop at the native level.
+	append(&chain, PPtr{local_id = inner_m.transform_parent, guid = inner_m.source_prefab})
 
-	for &m in s.nested_scenes {
-		if m.expand_parent == {} do continue
-		if _native_host_for_inner_ns(s, &m) != n_host do continue
-		if len(m.overrides) == 0 do continue
-
-		for ov in m.overrides {
-			mat, mok := breadcrumb_materialize_target(
-				s,
-				n.local_id,
-				PPtr{local_id = ov.target, guid = m.source_prefab},
-			)
-			if !mok do continue
-			outer_lid := mat.local_id
-
-			already := false
-			for &existing in n.overrides {
-				if existing.target == outer_lid && existing.property_path == ov.property_path {
-					already = true
-					break
+	cur := inner_m
+	for _ in 0 ..< 32 {
+		ep := cur.expand_parent
+		if ep == {} do return chain, nil, false
+		et := pool_get(&w.transforms, Handle(ep))
+		if et == nil do return chain, nil, false
+		if !et.nested_owned {
+			// ep belongs to the native scene — find its native NS.
+			for &n2 in s.nested_scenes {
+				if n2.expand_parent != {} do continue
+				if !nested_scene_hosts_transform(s, &n2, ep) do continue
+				// Reverse so chain becomes top-down.
+				n := len(chain)
+				for i in 0 ..< n / 2 {
+					chain[i], chain[n - 1 - i] = chain[n - 1 - i], chain[i]
 				}
+				return chain, &n2, true
 			}
-			if already do continue
-
-			append(&n.overrides, Override{
-				target        = outer_lid,
-				property_path = strings.clone(ov.property_path),
-				value         = json.clone_value(ov.value),
-			})
+			return chain, nil, false
 		}
+		// ep is a nested-owned host transform — owner must be another inner NS.
+		next: ^NestedScene = nil
+		for &n2 in s.nested_scenes {
+			if n2.expand_parent == {} do continue
+			if nested_scene_hosts_transform(s, &n2, ep) {
+				next = &n2
+				break
+			}
+		}
+		if next == nil do return chain, nil, false
+		append(&chain, PPtr{local_id = next.transform_parent, guid = next.source_prefab})
+		cur = next
 	}
+	return chain, nil, false
 }
 
 scene_save :: proc(s: ^Scene, path: string) -> bool {
 	if s == nil do return false
 	w := ctx_world()
 
-	for &ns in s.nested_scenes {
-		_nested_scene_capture_overrides(s, &ns)
-	}
-	// After every NS has its fresh shallow override list, lift inner-NS
-	// overrides into their owning native NS as breadcrumb-backed deep
-	// overrides. Done as a separate pass so the inner overrides we read are
-	// already up-to-date.
+	// Per docs/NestedPrefabs.md, overrides live at the root scene level only.
+	// Capture writes directly onto each chain's native NS; inner-NS records
+	// keep the overrides they loaded from their inner-prefab files (those are
+	// runtime-only — used by per-level shallow bake during resolve, never
+	// persisted by save's filter). Clear native NS overrides so the diff
+	// repopulates from scratch.
 	for &ns in s.nested_scenes {
 		if ns.expand_parent != {} do continue
-		_propagate_deep_overrides_into(s, &ns)
+		for &ov in ns.overrides {
+			delete(ov.property_path)
+			json.destroy_value(ov.value)
+		}
+		clear(&ns.overrides)
+	}
+	for &ns in s.nested_scenes {
+		_capture_overrides_to_native(s, &ns)
+	}
+
+	// Prune orphan breadcrumbs whose owning NS no longer references them as a
+	// host peg or override target. Cross-scene Handle pegs (no NS owner) are
+	// left alone — they're referenced via Handle/PPtr fields elsewhere, not
+	// through NS overrides. Without this, repeatedly editing-reverting a deep
+	// field accumulates dead breadcrumb entries that bloat the file.
+	{
+		ns_referenced := make(map[Local_ID]bool, 0, context.temp_allocator)
+		for &ns in s.nested_scenes {
+			if ns.host_breadcrumb_id != 0 do ns_referenced[ns.host_breadcrumb_id] = true
+			for &ov in ns.overrides do ns_referenced[ov.target] = true
+		}
+		to_drop := make([dynamic]Local_ID, 0, 8, context.temp_allocator)
+		for lid, bc in s.breadcrumb_data {
+			if _, has_owner := _find_ns_by_local_id(s, bc.scene_instance); !has_owner do continue
+			if !ns_referenced[lid] do append(&to_drop, lid)
+		}
+		for lid in to_drop do breadcrumb_remove(s, lid)
 	}
 
 	sf := SceneFile{}
@@ -475,8 +658,78 @@ scene_save :: proc(s: ^Scene, path: string) -> bool {
 		s.path = strings.clone(path)
 	}
 
+	// Per docs/NestedPrefabs.md "Changes propagation": saving a prefab walks
+	// all live `NestedScene` records whose `source_prefab` GUID matches the
+	// saved asset and reloads them. Refresh `scene_lib`'s cached bytes for
+	// this asset, drop the unpacked-snapshot cache, and re-resolve every
+	// native NS whose chain transitively contains this guid in any loaded
+	// scene — including the scene we just saved (its own nested instances of
+	// itself, if any, plus any sibling NSs that depend on it via inner chain).
+	if guid, gok := asset_db_get_guid(path); gok {
+		asset_guid := Asset_GUID(guid)
+		if existing, has := scene_lib[asset_guid]; has do delete(existing)
+		fresh := make([]byte, len(data))
+		copy(fresh, data)
+		scene_lib[asset_guid] = fresh
+		scene_lib_unpacked_invalidate(asset_guid)
+		_propagate_prefab_save(asset_guid)
+	}
+
 	fmt.printf("[Scene] Saved scene to %s\n", path)
 	return true
+}
+
+// Walks all loaded scenes and re-resolves every native NS whose chain
+// transitively contains `saved_guid`. "Contains" means the native NS itself
+// has source_prefab == saved_guid, OR any inner NS under it (any NS with
+// expand_parent in that native's resolved subtree) has source_prefab ==
+// saved_guid. Re-resolving the native rebuilds its entire subtree, picking
+// up the freshly-saved prefab content.
+@(private = "file")
+_propagate_prefab_save :: proc(saved_guid: Asset_GUID) {
+	sm := ctx_scene_manager()
+	for i in 0 ..< sm.count {
+		s := sm.loaded[i]
+		if s == nil do continue
+
+		// Collect native NS local_ids whose chain involves saved_guid.
+		to_reresolve := make([dynamic]Local_ID, 0, 8, context.temp_allocator)
+		for &ns in s.nested_scenes {
+			if ns.source_prefab != saved_guid do continue
+			// Walk to the native ancestor.
+			cur := &ns
+			if cur.expand_parent == {} {
+				append(&to_reresolve, cur.local_id)
+				continue
+			}
+			for _ in 0 ..< 64 {
+				ep := cur.expand_parent
+				if ep == {} {
+					append(&to_reresolve, cur.local_id)
+					break
+				}
+				outer := scene_find_nested_scene_for_host(s, ep)
+				if outer == nil do break
+				if outer.expand_parent == {} {
+					append(&to_reresolve, outer.local_id)
+					break
+				}
+				cur = outer
+			}
+		}
+
+		// Dedup.
+		seen := make(map[Local_ID]bool, 0, context.temp_allocator)
+		for lid in to_reresolve {
+			if seen[lid] do continue
+			seen[lid] = true
+			ns_ptr, has := scene_nested_scene_by_local_id(s, lid)
+			if !has || ns_ptr == nil do continue
+			host_tH := nested_scene_resolve_host_handle(s, ns_ptr)
+			if host_tH == {} do continue
+			nested_scene_resolve(host_tH)
+		}
+	}
 }
 
 scene_file_load :: proc(filepath: string) -> (SceneFile, bool) {

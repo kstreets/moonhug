@@ -178,15 +178,21 @@ test_resolve_host_and_breadcrumb_when_nested_file_id_matches_native :: proc(t: ^
 	}
 
 	nested_c_b_t := engine.pool_get(&w.transforms, engine.Handle(nested_c_b))
-	if nested_c_b_t != nil && len(nested_c_b_t.children) > 0 {
-		testing.expect_value(t, len(nested_c_b_t.children), 1)
-		ch, ok := engine.scene_ref_resolve_transform(s, nested_c_b_t.children[0], nested_c_b)
-		testing.expect(t, ok)
-		if ok {
+	if nested_c_b_t != nil {
+		// Locate TransformC among TestC's children (TestC also nests TestD now,
+		// so the child list contains both TransformC and TestD's host).
+		found_transform_c := false
+		for cref in nested_c_b_t.children {
+			ch, ok := engine.scene_ref_resolve_transform(s, cref, nested_c_b)
+			testing.expect(t, ok)
+			if !ok do continue
 			deep := engine.pool_get(&w.transforms, engine.Handle(ch))
 			testing.expect(t, deep != nil && deep.parent.handle == engine.Handle(nested_c_b))
-			testing.expect(t, strings.compare(deep.name, "TransformC") == 0)
+			if deep != nil && strings.compare(deep.name, "TransformC") == 0 {
+				found_transform_c = true
+			}
 		}
+		testing.expect(t, found_transform_c, "expected TransformC among TestC's children")
 	}
 }
 

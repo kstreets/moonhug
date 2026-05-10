@@ -1,0 +1,102 @@
+{
+  "root": 1,
+  "next_local_id": 60,
+  "transforms": [
+    {
+      "local_id": 1,
+      "name": "RootDup",
+      "is_active": true,
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+        {
+          "pptr": {
+            "local_id": 3,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        },
+        {
+          "pptr": {
+            "local_id": 2,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "components": []
+    },
+    {
+      "local_id": 2,
+      "name": "SpriteA",
+      "is_active": true,
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 1,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [],
+      "components": [
+        {
+          "local_id": 50
+        }
+      ]
+    },
+    {
+      "local_id": 3,
+      "name": "SpriteB",
+      "is_active": true,
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 1,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [],
+      "components": [
+        {
+          "local_id": 51
+        }
+      ]
+    }
+  ],
+  "nested_scenes": [],
+  "breadcrumbs": [],
+  "cameras": [],
+  "lifetimes": [],
+  "players": [],
+  "scripts": [],
+  "sprite_renderers": [
+    {
+      "base": {
+        "local_id": 50,
+        "enabled": true
+      },
+      "texture": "00000000-0000-0000-0000-000000000000",
+      "color": [1, 0, 0, 1]
+    },
+    {
+      "base": {
+        "local_id": 51,
+        "enabled": true
+      },
+      "texture": "00000000-0000-0000-0000-000000000000",
+      "color": [0, 1, 0, 1]
+    }
+  ]
+}

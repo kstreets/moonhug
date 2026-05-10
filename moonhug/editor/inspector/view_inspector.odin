@@ -324,12 +324,15 @@ draw_field_context_menu :: proc(field_ptr: rawptr, field_tid: typeid, property_p
             w := engine.ctx_world()
             ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
             if ht != nil {
-                ns := engine.scene_find_nested_scene_for_host(ht.scene, host_tH)
-                is_overridden := engine.nested_scene_has_override(ns, nested_lid, property_path)
+                // Per docs/NestedPrefabs.md, overrides live at the root scene
+                // level only. Walk up to the root native NS and look for the
+                // breadcrumb-keyed override that root holds for this field.
+                root_ns, root_target, ok := engine.nested_scene_locate_root_override(ht.scene, host_tH, nested_lid)
+                is_overridden := ok && root_target != 0 && engine.nested_scene_has_override(root_ns, root_target, property_path)
                 if is_overridden {
 	                if im.MenuItem("Revert", nil, false, is_overridden) {
 	                    u := _field_menu_undo_begin(field_ptr, field_tid, "Revert")
-	                    engine.nested_scene_revert_override(ns, nested_lid, property_path)
+	                    engine.nested_scene_revert_override(ht.scene, root_ns, root_target, property_path, field_ptr)
 	                    _field_menu_undo_end(u)
 	                    mark_inspector_changed()
 	                }
@@ -399,8 +402,7 @@ draw_inspector :: proc(a: any, label: cstring = "", path_prefix: string = "") {
             w := engine.ctx_world()
             ht := engine.pool_get(&w.transforms, engine.Handle(host_tH))
             if ht != nil {
-                ns := engine.scene_find_nested_scene_for_host(ht.scene, host_tH)
-                is_field_overridden = engine.nested_scene_has_override(ns, nested_lid, full_path)
+                is_field_overridden = engine.nested_scene_has_root_override(ht.scene, host_tH, nested_lid, full_path)
             }
         }
 

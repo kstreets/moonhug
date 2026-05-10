@@ -4,11 +4,20 @@ import "core:fmt"
 import "core:os"
 import "core:encoding/json"
 import "core:encoding/uuid"
+import "core:path/filepath"
 
 MAX_SCENES :: 100
 Scene_ID :: i16
 
 scene_lib: map[Asset_GUID][]byte
+
+// Pre-baked, fully-unpacked subtree bytes per prefab GUID. Built lazily on the
+// first runtime instantiate (scene_instantiate_guid) by going through nested
+// resolve + unpack once, then snapshotting the flat result. Subsequent
+// instantiates of the same prefab skip the resolve work entirely and just
+// scene_paste_subtree the cached bytes.
+@(private)
+scene_lib_unpacked_cache: map[Asset_GUID][]byte
 
 SceneManager :: struct {
     loaded: [MAX_SCENES]^Scene,
@@ -155,6 +164,23 @@ scene_lib_shutdown :: proc() {
 	}
 	delete(scene_lib)
 	scene_lib = make(map[Asset_GUID][]byte)
+
+	for _, data in scene_lib_unpacked_cache {
+		delete(data)
+	}
+	delete(scene_lib_unpacked_cache)
+	scene_lib_unpacked_cache = make(map[Asset_GUID][]byte)
+}
+
+// Drops the cached unpacked snapshot for `guid`. Call when the prefab source
+// changes (e.g., user saves an edit to the .scene file) so the next runtime
+// instantiate picks up the new content. Editor-side instantiation uses
+// scene_instantiate_guid_nested, which doesn't touch this cache.
+scene_lib_unpacked_invalidate :: proc(guid: Asset_GUID) {
+	if data, ok := scene_lib_unpacked_cache[guid]; ok {
+		delete(data)
+		delete_key(&scene_lib_unpacked_cache, guid)
+	}
 }
 
 scene_lib_register :: proc(guid: Asset_GUID) -> bool {
@@ -169,20 +195,83 @@ scene_lib_register :: proc(guid: Asset_GUID) -> bool {
 	return true
 }
 
+// Runtime spawn: instantiates a prefab as a flat (unpacked) transform tree
+// under `parent`. The first call for a given GUID does the full nested
+// resolve + unpack and snapshots the result into scene_lib_unpacked_cache;
+// every subsequent call just scene_paste_subtree's the cached bytes — no
+// resolve, no override application, no NS bookkeeping at runtime.
 scene_instantiate_guid :: proc(guid: Asset_GUID, parent: Transform_Handle) -> Transform_Handle {
-    raw, ok := scene_lib[guid]
-    if !ok do return {}
-    sf: SceneFile
-    if err := json.unmarshal(raw, &sf); err != nil do return {}
-    defer scene_file_destroy(&sf)
-    w := ctx_world()
-    tr := pool_get(&w.transforms, Handle(parent))
-    sc: ^Scene
-    if tr != nil do sc = tr.scene
-    _scene_file_remap_local_ids(&sf, sc)
-    root_tH := _scene_load_as_child(&sf, parent, sc, guid)
-    if root_tH != {} {
-        _scene_resolve_nested_in_subtree(root_tH)
+    if parent == {} do return {}
+
+    if cached, has := scene_lib_unpacked_cache[guid]; has {
+        return scene_paste_subtree(cached, parent)
     }
-    return root_tH
+
+    host_tH := scene_instantiate_guid_nested(guid, parent)
+    if host_tH == {} do return {}
+    nested_scene_unpack_subtree(host_tH)
+
+    if bytes := scene_copy_subtree(host_tH); bytes != nil {
+        scene_lib_unpacked_cache[guid] = bytes
+    }
+    return host_tH
+}
+
+// Editor spawn: instantiates a prefab as a NestedScene reference under
+// `parent`. Keeps NS metadata and `nested_owned` flags so the editor can show
+// override badges, capture edits as overrides on save, etc.
+scene_instantiate_guid_nested :: proc(guid: Asset_GUID, parent: Transform_Handle) -> Transform_Handle {
+    if !scene_lib_register(guid) do return {}
+    w := ctx_world()
+    pt := pool_get(&w.transforms, Handle(parent))
+    if pt == nil do return {}
+    sc := pt.scene
+    if sc == nil do return {}
+
+    name := ""
+    if path, ok := asset_db_get_path(uuid.Identifier(guid)); ok {
+        name = filepath.stem(path)
+    }
+
+    host_tH := transform_new(name, parent)
+    if host_tH == {} do return {}
+
+    // Seed host's local scale/rotation from the prefab's root transform.
+    // After resolve, the prefab's root transform is destroyed and its content
+    // absorbed into the host; without this, the host keeps transform_new's
+    // identity defaults and a scaled/rotated prefab (e.g., bullet's [0.1] root
+    // scale) renders at the wrong size. Position is left at 0 so callers can
+    // place the instance in the world.
+    if root_scale, root_rot, ok := _prefab_raw_root_scale_rotation(guid); ok {
+        if ht := pool_get(&w.transforms, Handle(host_tH)); ht != nil {
+            ht.scale = root_scale
+            ht.rotation = root_rot
+        }
+    }
+
+    pt = pool_get(&w.transforms, Handle(parent))
+    sibling_idx := len(pt.children) - 1
+    if nested_scene_add(sc, guid, host_tH, sibling_idx) == nil {
+        transform_destroy(host_tH)
+        return {}
+    }
+    nested_scene_resolve(host_tH)
+    return host_tH
+}
+
+@(private)
+_prefab_raw_root_scale_rotation :: proc(guid: Asset_GUID) -> (scale: [3]f32, rotation: [4]f32, ok: bool) {
+    raw, has := scene_lib[guid]
+    if !has do return {1, 1, 1}, QUAT_IDENTITY, false
+    sf: SceneFile
+    if err := json.unmarshal(raw, &sf); err != nil do return {1, 1, 1}, QUAT_IDENTITY, false
+    defer scene_file_destroy(&sf)
+    for &t in sf.transforms {
+        if t.local_id == sf.root {
+            r := t.rotation
+            if r == {0, 0, 0, 0} do r = QUAT_IDENTITY
+            return t.scale, r, true
+        }
+    }
+    return {1, 1, 1}, QUAT_IDENTITY, false
 }

@@ -2,19 +2,25 @@
 
 > MoonHug Editor uses scenes as prefabs so prefab is synonym to scene in thid document.
 
+## Links
+- [Technical deep dive into the new Prefab system - Unite LA](https://www.youtube.com/watch?v=HxbSJ-EIjXI)
+- [Understanding Unity’s serialization language, YAML](https://unity.com/blog/engine-platform/understanding-unitys-serialization-language-yaml)
+
+## Roadmap
+
 - nested prefabs roadmap:
   - [v] scene tree data model
   - [v] serialization: scene tree file with guid in project
   - [v] asset registry: AssetDB
   - [v] instantiate scene tree as child
 
-  - prefab instance node type:
-    - [v] opaque nested scene, instantiated at gameplay only
-    - [v] transparent nested scene (metadata for ref and overrides)
-    - breadcrumbs — serialized cross-scene references
-    - deep nested prefabs
+  - [v] prefab instance record
+  - [v] transparent nested scene
+  - [v] prefab overrides: nested scene instance overrides
 
-  - [v] property overrides: nested scene instance overrides
+  - [v] deep nested prefabs
+  - [v] breadcrumbs — serialized nested-cross-scene references
+
   - prefab variants
 
 # Design
@@ -88,7 +94,7 @@ Override {
 }
 ```
 
-- Entire array as one atomic override. Never override individual elements. If anything inside the array changes, the whole array is the override value:
+- Entire array is one atomic override. Never override individual elements. If anything inside the array changes, the whole array is the override value:
 
 
 ## Runtime usage

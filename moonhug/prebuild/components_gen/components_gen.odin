@@ -462,8 +462,9 @@ generate_scene_file :: proc(data: ^ComponentCollectData, out_dir: string) -> boo
 		strings.write_string(&b, "\t\t\t}\n")
 	}
 	strings.write_string(&b, "\t\t}\n")
-	strings.write_string(&b, "\t\tfor bc in sf.breadcrumbs {\n")
+	strings.write_string(&b, "\t\tfor &bc in sf.breadcrumbs {\n")
 	strings.write_string(&b, "\t\t\tscene_breadcrumb_put(s, bc)\n")
+	strings.write_string(&b, "\t\t\tbc.scene_path = nil\n")
 	strings.write_string(&b, "\t\t}\n")
 	strings.write_string(&b, "\t}\n\n")
 	strings.write_string(&b, "\troot_handle: Handle\n")
@@ -578,6 +579,9 @@ generate_scene_file :: proc(data: ^ComponentCollectData, out_dir: string) -> boo
 	strings.write_string(&b, "\t\tdelete(ns.overrides)\n")
 	strings.write_string(&b, "\t}\n")
 	strings.write_string(&b, "\tdelete(sf.nested_scenes)\n")
+	strings.write_string(&b, "\tfor &bc in sf.breadcrumbs {\n")
+	strings.write_string(&b, "\t\tif bc.scene_path != nil do delete(bc.scene_path)\n")
+	strings.write_string(&b, "\t}\n")
 	strings.write_string(&b, "\tdelete(sf.breadcrumbs)\n")
 	for e in data.entries {
 		fmt.sbprintf(&b, "\tfor &c in sf.%s {{ type_cleanup(.%s, &c) }}\n", e.plural, e.type_name)
@@ -594,6 +598,8 @@ generate_scene_file :: proc(data: ^ComponentCollectData, out_dir: string) -> boo
 	strings.write_string(&b, "\t}\n")
 	strings.write_string(&b, "\tdelete(sf.transforms)\n")
 	strings.write_string(&b, "\tdelete(sf.nested_scenes)\n")
+	// Shallow destroy: do NOT free bc.scene_path — callers may share those
+	// pointers with the live Scene; only scene_destroy may free them.
 	strings.write_string(&b, "\tdelete(sf.breadcrumbs)\n")
 	for e in data.entries {
 		fmt.sbprintf(&b, "\tdelete(sf.%s)\n", e.plural)

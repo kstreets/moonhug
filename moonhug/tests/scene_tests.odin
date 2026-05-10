@@ -3,6 +3,7 @@ package tests
 import "../engine"
 import "../app"
 
+import "core:fmt"
 import "core:testing"
 import "core:os"
 import "core:strings"
@@ -598,7 +599,7 @@ test_revert_override_restores_base_value :: proc(t: ^testing.T) {
 	testing.expect(t, owning_ns != nil, "expected some NestedScene to own the position override after reload")
 	if owning_ns == nil do return
 
-	engine.nested_scene_revert_override(owning_ns, 2, "position")
+	engine.nested_scene_revert_override(reloaded, owning_ns, 2, "position")
 
 	for ov in owning_ns.overrides {
 		testing.expect(t, !(ov.target == 2 && strings.compare(ov.property_path, "position") == 0),
@@ -607,6 +608,410 @@ test_revert_override_restores_base_value :: proc(t: ^testing.T) {
 
 	// TransformC's base position in TestC.scene is {7, 8, 9}.
 	testing.expect_value(t, t_c2.position, [3]f32{7, 8, 9})
+}
+
+// Regression: with multiple instances of the same nested prefab in a scene
+// (TestA hosts TestB twice), reverting an override on one instance must not
+// touch the same-local_id transform owned by the other instance. The previous
+// implementation walked the whole transform pool by local_id and would clobber
+// whichever match it found first.
+@(test)
+test_revert_override_scoped_to_owning_instance :: proc(t: ^testing.T) {
+	engine.asset_db_init("moonhug/tests/fixtures/nested_scenes")
+	defer engine.asset_db_shutdown()
+	defer engine.scene_lib_shutdown()
+
+	tc_mem := new(TestCtx)
+	defer free(tc_mem)
+	setup(tc_mem, "moonhug/tests/fixtures/_test_revert_scope.scene")
+	context.user_ptr = &tc_mem.uc
+	defer teardown(tc_mem)
+
+	loaded := engine.scene_load_single_path("moonhug/tests/fixtures/nested_scenes/TestA.scene")
+	testing.expect(t, loaded != nil)
+	if loaded == nil do return
+	tc_mem.scene = loaded
+
+	host_b1 := find_transform_named(&tc_mem.world, loaded, "TestB", false)
+	host_b2 := find_transform_named(&tc_mem.world, loaded, "TestB2", false)
+	testing.expect(t, host_b1 != {} && host_b2 != {})
+	if host_b1 == {} || host_b2 == {} do return
+
+	tc1 := find_nested_named_under_host(&tc_mem.world, loaded, host_b1, "TransformC")
+	tc2 := find_nested_named_under_host(&tc_mem.world, loaded, host_b2, "TransformC")
+	testing.expect(t, tc1 != {} && tc2 != {} && tc1 != tc2)
+	if tc1 == {} || tc2 == {} do return
+
+	t_c1 := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tc1))
+	t_c2 := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tc2))
+	if t_c1 == nil || t_c2 == nil do return
+
+	// Mutate both, save, and reload so deep overrides are written and re-read.
+	t_c1.position = {11, 11, 11}
+	t_c2.position = {22, 22, 22}
+	testing.expect(t, engine.scene_save(loaded, tc_mem.path))
+
+	reloaded := engine.scene_load_single_path(tc_mem.path)
+	testing.expect(t, reloaded != nil)
+	if reloaded == nil do return
+	tc_mem.scene = reloaded
+
+	host_b1r := find_transform_named(&tc_mem.world, reloaded, "TestB", false)
+	host_b2r := find_transform_named(&tc_mem.world, reloaded, "TestB2", false)
+	testing.expect(t, host_b1r != {} && host_b2r != {})
+	if host_b1r == {} || host_b2r == {} do return
+
+	tc1r := find_nested_named_under_host(&tc_mem.world, reloaded, host_b1r, "TransformC")
+	tc2r := find_nested_named_under_host(&tc_mem.world, reloaded, host_b2r, "TransformC")
+	testing.expect(t, tc1r != {} && tc2r != {} && tc1r != tc2r)
+	if tc1r == {} || tc2r == {} do return
+
+	t_c1r := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tc1r))
+	t_c2r := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tc2r))
+	if t_c1r == nil || t_c2r == nil do return
+	testing.expect_value(t, t_c1r.position, [3]f32{11, 11, 11})
+	testing.expect_value(t, t_c2r.position, [3]f32{22, 22, 22})
+
+	// Per docs/NestedPrefabs.md: overrides live at the root scene level only.
+	// The TestA-1 → TestB-1 deep override on TransformC.position is stored on
+	// the native (root-scene) NS for TestB-1, keyed by a breadcrumb whose
+	// scene_path threads through TestC. Find that NS and the breadcrumb-keyed
+	// override entry.
+	owning_ns: ^engine.NestedScene
+	owning_target: engine.Local_ID
+	for &ns_iter in reloaded.nested_scenes {
+		if ns_iter.expand_parent != {} do continue
+		if engine.nested_scene_resolve_host_handle(reloaded, &ns_iter) != host_b1r do continue
+		for ov in ns_iter.overrides {
+			if strings.compare(ov.property_path, "position") != 0 do continue
+			bc, has_bc := engine.breadcrumb_get(reloaded, ov.target)
+			if !has_bc do continue
+			if bc.scene_source.local_id != 2 do continue
+			owning_ns = &ns_iter
+			owning_target = ov.target
+			break
+		}
+		if owning_ns != nil do break
+	}
+	testing.expect(t, owning_ns != nil)
+	if owning_ns == nil do return
+
+	engine.nested_scene_revert_override(reloaded, owning_ns, owning_target, "position", &t_c1r.position)
+
+	// TestB-1's TransformC should snap back to TestB's baked base ([50,50,50],
+	// the value TestB.scene's own NS-for-C override applies to TransformC);
+	// TestB-2's TransformC must remain at the unrelated {22,22,22} since the
+	// revert was scoped to TestB-1's instance.
+	testing.expect_value(t, t_c1r.position, [3]f32{50, 50, 50})
+	testing.expect_value(t, t_c2r.position, [3]f32{22, 22, 22})
+}
+
+@(test)
+test_revert_nested_sprite_respects_transform_scope_for_duplicate_comp_local_ids :: proc(t: ^testing.T) {
+	engine.asset_db_init("moonhug/tests/fixtures/nested_scenes")
+	defer engine.asset_db_shutdown()
+	defer engine.scene_lib_shutdown()
+
+	tc_mem := new(TestCtx)
+	defer free(tc_mem)
+	setup(tc_mem, "moonhug/tests/fixtures/_test_dup_sprite_revert_scope.scene")
+	context.user_ptr = &tc_mem.uc
+	defer teardown(tc_mem)
+
+	loaded := engine.scene_load_single_path("moonhug/tests/fixtures/nested_scenes/HostDup.scene")
+	testing.expect(t, loaded != nil)
+	if loaded == nil do return
+	tc_mem.scene = loaded
+
+	guid_sprite, ge := uuid.read("a1000000-0000-4000-8000-000000000001")
+	testing.expect(t, ge == nil)
+	if ge != nil do return
+	g_asset := engine.Asset_GUID(guid_sprite)
+
+	slot_h := find_transform_named(&tc_mem.world, loaded, "Slot", false)
+	a_h := find_nested_named_under_host(&tc_mem.world, loaded, slot_h, "SpriteA")
+	b_h := find_nested_named_under_host(&tc_mem.world, loaded, slot_h, "SpriteB")
+	testing.expect(t, slot_h != {} && a_h != {} && b_h != {})
+	if slot_h == {} || a_h == {} || b_h == {} do return
+
+	_, sr_a := engine.transform_get_comp(a_h, engine.SpriteRenderer)
+	_, sr_b := engine.transform_get_comp(b_h, engine.SpriteRenderer)
+	testing.expect(t, sr_a != nil && sr_b != nil)
+	if sr_a == nil || sr_b == nil do return
+
+	dup_lid := sr_a.local_id
+	sr_b.local_id = dup_lid
+	sr_a.color = {0.9, 0.4, 0.1, 1}
+
+	owning_ns: ^engine.NestedScene
+	for &ns in loaded.nested_scenes {
+		if ns.source_prefab != g_asset do continue
+		if engine.nested_scene_resolve_host_handle(loaded, &ns) != slot_h do continue
+		owning_ns = &ns
+		break
+	}
+	testing.expect(t, owning_ns != nil)
+	if owning_ns == nil do return
+
+	ov_val: json.Value
+	json_err := json.unmarshal_string("[0.9,0.4,0.1,1]", &ov_val)
+	testing.expect(t, json_err == nil)
+	if json_err != nil do return
+	defer json.destroy_value(ov_val)
+	append(
+		&owning_ns.overrides,
+		engine.Override{target = dup_lid, property_path = strings.clone("color"), value = json.clone_value(ov_val)},
+	)
+
+	engine.nested_scene_revert_override(loaded, owning_ns, dup_lid, "color", rawptr(&sr_a.color))
+
+	testing.expect_value(t, sr_a.color, [4]f32{1, 0, 0, 1})
+	testing.expect_value(t, sr_b.color, [4]f32{0, 1, 0, 1})
+}
+
+// Per docs/NestedPrefabs.md, an outer prefab's overrides on its inner prefab
+// are "baked" into the inner content as the parent scene sees it — they're
+// opaque from the root scene's perspective. So when the root scene records
+// its own override on top and the user later reverts it, the live value must
+// snap back to the BAKED state (outer prefab's overrides applied), not to
+// the inner prefab's raw on-disk content.
+//
+// TestB.scene overrides TransformC's position to [50,50,50] on its TestC NS,
+// so opening TestA shows TransformC at [50,50,50] (TestB-baked) — even though
+// TestC.scene's base says [7,8,9]. This test layers a TestA-level deep override
+// on top, reverts it, and asserts the value snaps to TestB-baked, not TestC-base.
+@(test)
+test_revert_uses_outer_prefab_baked_base :: proc(t: ^testing.T) {
+	engine.asset_db_init("moonhug/tests/fixtures/nested_scenes")
+	defer engine.asset_db_shutdown()
+	defer engine.scene_lib_shutdown()
+
+	tc_mem := new(TestCtx)
+	defer free(tc_mem)
+	setup(tc_mem, "moonhug/tests/fixtures/_test_revert_baked.scene")
+	context.user_ptr = &tc_mem.uc
+	defer teardown(tc_mem)
+
+	loaded := engine.scene_load_single_path("moonhug/tests/fixtures/nested_scenes/TestA.scene")
+	testing.expect(t, loaded != nil)
+	if loaded == nil do return
+	tc_mem.scene = loaded
+
+	host_b1 := find_transform_named(&tc_mem.world, loaded, "TestB", false)
+	testing.expect(t, host_b1 != {})
+	if host_b1 == {} do return
+
+	tc := find_nested_named_under_host(&tc_mem.world, loaded, host_b1, "TransformC")
+	testing.expect(t, tc != {})
+	if tc == {} do return
+
+	t_tc := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tc))
+	testing.expect(t, t_tc != nil)
+	if t_tc == nil do return
+	// Sanity: TestB's NS-for-C override (position=[50,50,50] on lid=2) must
+	// already be applied to the live TransformC inside TestB's expansion.
+	testing.expect_value(t, t_tc.position, [3]f32{50, 50, 50})
+
+	// Layer a TestA-level deep override on top.
+	t_tc.position = {99, 99, 99}
+	testing.expect(t, engine.scene_save(loaded, tc_mem.path))
+
+	reloaded := engine.scene_load_single_path(tc_mem.path)
+	testing.expect(t, reloaded != nil)
+	if reloaded == nil do return
+	tc_mem.scene = reloaded
+
+	host_b1r := find_transform_named(&tc_mem.world, reloaded, "TestB", false)
+	if host_b1r == {} do return
+	tcr := find_nested_named_under_host(&tc_mem.world, reloaded, host_b1r, "TransformC")
+	testing.expect(t, tcr != {})
+	if tcr == {} do return
+
+	t_tcr := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tcr))
+	testing.expect(t, t_tcr != nil)
+	if t_tcr == nil do return
+	testing.expect_value(t, t_tcr.position, [3]f32{99, 99, 99})
+
+	// Locate the native NS for TestB-1 and the breadcrumb-keyed override.
+	owning_ns: ^engine.NestedScene
+	owning_target: engine.Local_ID
+	for &ns_iter in reloaded.nested_scenes {
+		if ns_iter.expand_parent != {} do continue
+		if engine.nested_scene_resolve_host_handle(reloaded, &ns_iter) != host_b1r do continue
+		for ov in ns_iter.overrides {
+			if strings.compare(ov.property_path, "position") != 0 do continue
+			bc, has_bc := engine.breadcrumb_get(reloaded, ov.target)
+			if !has_bc do continue
+			if bc.scene_source.local_id != 2 do continue
+			owning_ns = &ns_iter
+			owning_target = ov.target
+			break
+		}
+		if owning_ns != nil do break
+	}
+	testing.expect(t, owning_ns != nil)
+	if owning_ns == nil do return
+
+	engine.nested_scene_revert_override(reloaded, owning_ns, owning_target, "position", &t_tcr.position)
+
+	// Revert must snap to the OUTER-prefab baked state. TestB's NS-for-C sets
+	// position=[50,50,50], so the baked value the root scene sees is [50,50,50],
+	// not TestC.scene's raw base [7,8,9].
+	testing.expect_value(t, t_tcr.position, [3]f32{50, 50, 50})
+}
+
+// Inspector-marking regression: when the user opens a root scene that nests a
+// chain of prefabs, fields modified inside the deeper prefab levels must be
+// flagged as overridden in the inspector. Picking the OUTER native host's NS
+// (as `transform_nested_enclosing_host` would) misses overrides that live on
+// the inner NS records distributed during resolve. The inspector now uses
+// `transform_immediate_nested_host`, which returns the nested-owned host that
+// directly encloses the inspected element — that NS is the one that owns the
+// matching override.
+@(test)
+test_inspector_marks_inner_nested_override :: proc(t: ^testing.T) {
+	engine.asset_db_init("moonhug/tests/fixtures/nested_scenes")
+	defer engine.asset_db_shutdown()
+	defer engine.scene_lib_shutdown()
+
+	tc_mem := new(TestCtx)
+	defer free(tc_mem)
+	setup(tc_mem)
+	context.user_ptr = &tc_mem.uc
+	defer teardown(tc_mem)
+
+	loaded := engine.scene_load_single_path("moonhug/tests/fixtures/nested_scenes/TestA.scene")
+	testing.expect(t, loaded != nil)
+	if loaded == nil do return
+	tc_mem.scene = loaded
+
+	host_b1 := find_transform_named(&tc_mem.world, loaded, "TestB", false)
+	testing.expect(t, host_b1 != {})
+	if host_b1 == {} do return
+
+	// TransformC is uniquely named and lives one nesting level deeper than
+	// TestB's host (it's owned by the inner TestC NS).
+	tc := find_nested_named_under_host(&tc_mem.world, loaded, host_b1, "TransformC")
+	testing.expect(t, tc != {})
+	if tc == {} do return
+
+	// transform_find_nested_host walks past the inner host and returns the
+	// outermost native host (TestB). transform_immediate_nested_host stops at
+	// the FIRST host ancestor — the inner TestC host whose NS holds C-level
+	// overrides.
+	outer := engine.transform_find_nested_host(tc)
+	immediate := engine.transform_immediate_nested_host(tc)
+	testing.expect(t, outer == host_b1, "outer host should be TestB")
+	testing.expect(t, immediate != {} && immediate != host_b1,
+		"immediate host must differ from outer (must be the inner TestC host)")
+	if immediate == {} || immediate == host_b1 do return
+
+	im_t := engine.pool_get(&tc_mem.world.transforms, engine.Handle(immediate))
+	testing.expect(t, im_t != nil && im_t.nested_owned,
+		"the immediate host is itself nested-owned (it lives inside TestB's expansion)")
+
+	outer_ns := engine.scene_find_nested_scene_for_host(loaded, outer)
+	inner_ns := engine.scene_find_nested_scene_for_host(loaded, immediate)
+	testing.expect(t, outer_ns != nil && inner_ns != nil && outer_ns != inner_ns,
+		"outer and inner host transforms must resolve to distinct NS records")
+	if outer_ns == nil || inner_ns == nil do return
+
+	// TestB.scene pre-applies a "name" override (target=1) on its TestC NS.
+	// That override is distributed onto the inner NS during resolve and must
+	// be reachable from the inspector via the inner host — not the outer one.
+	testing.expect(t, !engine.nested_scene_has_override(outer_ns, 1, "name"),
+		"outer NS should NOT carry the C-level override (target lid is in C's namespace)")
+	testing.expect(t, engine.nested_scene_has_override(inner_ns, 1, "name"),
+		"inner NS must report the C-level override under target=1")
+}
+
+// Verifies the 4-level chain (TestA → TestB → TestC → TestD): an override on
+// TransformD inside TestB→TestC→TestD must be lifted all the way up to TestA's
+// outer NS as a chain-encoded breadcrumb, and round-tripped back on reload.
+// Before scene_path was added the propagation gave up past one inner level so
+// these overrides were silently dropped.
+@(test)
+test_deep_override_4_level_chain :: proc(t: ^testing.T) {
+	engine.asset_db_init("moonhug/tests/fixtures/nested_scenes")
+	defer engine.asset_db_shutdown()
+	defer engine.scene_lib_shutdown()
+
+	tc_mem := new(TestCtx)
+	defer free(tc_mem)
+	setup(tc_mem, "moonhug/tests/fixtures/_test_deep4.scene")
+	context.user_ptr = &tc_mem.uc
+	defer teardown(tc_mem)
+
+	loaded := engine.scene_load_single_path("moonhug/tests/fixtures/nested_scenes/TestA.scene")
+	testing.expect(t, loaded != nil)
+	if loaded == nil do return
+	tc_mem.scene = loaded
+
+	host_b1 := find_transform_named(&tc_mem.world, loaded, "TestB", false)
+	testing.expect(t, host_b1 != {})
+	if host_b1 == {} do return
+
+	tc_under_b1 := find_nested_named_under_host(&tc_mem.world, loaded, host_b1, "TestC")
+	testing.expect(t, tc_under_b1 != {})
+	if tc_under_b1 == {} do return
+
+	// TransformD lives one level below TestC's host, inside TestD's expansion.
+	// find_nested_named_under_host scopes by `transform_find_nested_host` which
+	// returns the nearest non-nested-owned host above — that's still host_b1.
+	td := find_nested_named_under_host(&tc_mem.world, loaded, host_b1, "TransformD")
+	testing.expect(t, td != {})
+	if td == {} do return
+
+	t_d := engine.pool_get(&tc_mem.world.transforms, engine.Handle(td))
+	testing.expect(t, t_d != nil)
+	if t_d == nil do return
+
+	want_pos := [3]f32{77, 88, 99}
+	t_d.position = want_pos
+	testing.expect(t, engine.scene_save(loaded, tc_mem.path))
+
+	// Inspect the saved file: there should be a breadcrumb whose scene_path has
+	// two hops (C_guid → D_guid) and whose scene_source.local_id = 2 (TransformD's
+	// id in TestD's namespace).
+	{
+		guid_c, _ := uuid.read("ee7d67e6-2c06-41a5-a1f2-3b021b642202")
+		guid_d, _ := uuid.read("9d8c54a0-6f5b-4d0e-9b8a-1a2c3d4e5f60")
+		guid_c_a := engine.Asset_GUID(guid_c)
+		guid_d_a := engine.Asset_GUID(guid_d)
+
+		sf, fok := engine.scene_file_load(tc_mem.path)
+		testing.expect(t, fok)
+		if !fok do return
+		defer engine.scene_file_destroy(&sf)
+
+		found_chain_bc := false
+		for bc in sf.breadcrumbs {
+			if len(bc.scene_path) != 2 do continue
+			if bc.scene_path[0].guid != guid_c_a do continue
+			if bc.scene_path[1].guid != guid_d_a do continue
+			if bc.scene_source.guid != guid_d_a do continue
+			if bc.scene_source.local_id != 2 do continue
+			found_chain_bc = true
+			break
+		}
+		testing.expect(t, found_chain_bc,
+			"saved file must contain a breadcrumb with a 2-hop scene_path encoding the deep override into TestD")
+	}
+
+	reloaded := engine.scene_load_single_path(tc_mem.path)
+	testing.expect(t, reloaded != nil)
+	if reloaded == nil do return
+	tc_mem.scene = reloaded
+
+	host_b1r := find_transform_named(&tc_mem.world, reloaded, "TestB", false)
+	tdr := find_nested_named_under_host(&tc_mem.world, reloaded, host_b1r, "TransformD")
+	testing.expect(t, host_b1r != {} && tdr != {})
+	if host_b1r == {} || tdr == {} do return
+
+	t_dr := engine.pool_get(&tc_mem.world.transforms, engine.Handle(tdr))
+	testing.expect(t, t_dr != nil)
+	if t_dr == nil do return
+	testing.expect_value(t, t_dr.position, want_pos)
 }
 
 @(test)
@@ -656,20 +1061,27 @@ test_save_nested_b_to_c_writes_overrides_for_modified_c :: proc(t: ^testing.T) {
 	if !file_ok do return
 	defer engine.scene_file_destroy(&sf)
 
-	bc_lid := engine.Local_ID(0)
+	// TestA contains two TestB instances (TestB and TestB2), so there are two
+	// breadcrumbs pointing at (TestC GUID, local_id=2) — one per instance. Save
+	// emits breadcrumbs in non-deterministic order (map iteration), so we must
+	// check ALL of them rather than locking onto the first match.
+	bc_lids := make([dynamic]engine.Local_ID, 0, 2, context.temp_allocator)
 	for bc in sf.breadcrumbs {
 		if bc.scene_source.guid == guid_asset && bc.scene_source.local_id == 2 {
-			bc_lid = bc.local_id
-			break
+			append(&bc_lids, bc.local_id)
 		}
 	}
-	testing.expect(t, bc_lid != 0,
+	testing.expect(t, len(bc_lids) > 0,
 		"saved file should contain a breadcrumb pointing to (TestC GUID, local_id=2)")
 
 	deep_ok := false
 	for ns in sf.nested_scenes {
 		for ov in ns.overrides {
-			if ov.target != bc_lid do continue
+			matches_bc := false
+			for lid in bc_lids {
+				if ov.target == lid { matches_bc = true; break }
+			}
+			if !matches_bc do continue
 			if strings.compare(ov.property_path, "position") != 0 do continue
 			if override_vec3_matches(ov.value, want_pos) {
 				deep_ok = true

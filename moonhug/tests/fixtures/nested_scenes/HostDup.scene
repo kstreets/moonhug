@@ -1,0 +1,72 @@
+{
+  "root": 10,
+  "next_local_id": 20,
+  "transforms": [
+    {
+      "local_id": 10,
+      "name": "HostRoot",
+      "is_active": true,
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 0,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [
+        {
+          "pptr": {
+            "local_id": 11,
+            "guid": "00000000-0000-0000-0000-000000000000"
+          }
+        }
+      ],
+      "components": []
+    },
+    {
+      "local_id": 11,
+      "name": "Slot",
+      "is_active": true,
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "render_layer": 1,
+      "parent": {
+        "pptr": {
+          "local_id": 10,
+          "guid": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "children": [],
+      "components": []
+    }
+  ],
+  "nested_scenes": [
+    {
+      "local_id": 12,
+      "source_prefab": "a1000000-0000-4000-8000-000000000001",
+      "transform_parent": 11,
+      "host_breadcrumb_id": 13,
+      "sibling_index": 0,
+      "overrides": []
+    }
+  ],
+  "breadcrumbs": [
+    {
+      "local_id": 13,
+      "scene_source": {
+        "local_id": 11,
+        "guid": "00000000-0000-0000-0000-000000000000"
+      },
+      "scene_instance": 12
+    }
+  ],
+  "cameras": [],
+  "lifetimes": [],
+  "players": [],
+  "scripts": [],
+  "sprite_renderers": []
+}

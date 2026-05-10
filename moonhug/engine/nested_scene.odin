@@ -12,8 +12,30 @@ Override :: struct {
 
 Breadcrumb :: struct {
     local_id:           Local_ID,  // referrer will use this local_id for resolving
-    scene_source:       PPtr,      // contains asset guid and local_id inside it
-    scene_instance:     Local_ID,  // local_id of prefab instance in this file
+    scene_source:       PPtr,      // final destination: (deepest prefab guid, local_id in that prefab)
+    scene_instance:     Local_ID,  // local_id of NestedScene record this breadcrumb is anchored to
+    // Chain of inner-NS hops (top-down) to traverse before reaching the
+    // destination. Each entry is (inner prefab guid, host transform local_id in
+    // the parent prefab's namespace). Used to encode deep overrides that span
+    // 3+ prefab levels. Empty for direct host pegs and for legacy breadcrumbs
+    // saved before this field existed (which the resolver treats as a single
+    // implicit hop matching scene_source.guid).
+    scene_path:         []PPtr,
+}
+
+@(private = "file")
+_breadcrumb_dispose :: proc(bc: ^Breadcrumb) {
+    if bc.scene_path != nil {
+        delete(bc.scene_path)
+        bc.scene_path = nil
+    }
+}
+
+_breadcrumb_clone_path :: proc(src: []PPtr) -> []PPtr {
+    if len(src) == 0 do return nil
+    out := make([]PPtr, len(src))
+    copy(out, src)
+    return out
 }
 
 pptr_guid_is_empty :: proc(g: Asset_GUID) -> bool {
@@ -369,6 +391,26 @@ transform_find_nested_host :: proc(tH: Transform_Handle) -> Transform_Handle {
     return {}
 }
 
+// Walks `tH` and its ancestors and returns the nearest one that is the host of
+// some NestedScene record, regardless of `nested_owned`. Differs from
+// `transform_find_nested_host` (which only stops at NON-nested-owned hosts and
+// thus returns the outermost native host) — for a transform 2+ prefab levels
+// deep in a nested chain, this returns its *own* enclosing inner-NS host, which
+// is the record that owns overrides for that transform's content.
+transform_immediate_nested_host :: proc(tH: Transform_Handle) -> Transform_Handle {
+    w := ctx_world()
+    current := tH
+    for pool_valid(&w.transforms, Handle(current)) {
+        t := pool_get(&w.transforms, Handle(current))
+        if t == nil do return {}
+        if scene_find_nested_scene_for_host(t.scene, current) != nil {
+            return current
+        }
+        current = Transform_Handle(t.parent.handle)
+    }
+    return {}
+}
+
 transform_nested_enclosing_host :: proc(tH: Transform_Handle) -> Transform_Handle {
     w := ctx_world()
     t := pool_get(&w.transforms, Handle(tH))
@@ -432,6 +474,12 @@ _transform_is_descendant_or_self :: proc(tH, ancestorH: Transform_Handle) -> boo
 @(private = "file")
 _nested_scene_scan_hosts_for_lid :: proc(s: ^Scene, ns: ^NestedScene, lid: Local_ID) -> (Transform_Handle, int) {
 	if s == nil || ns == nil || lid == 0 do return {}, 0
+	if ns.host_breadcrumb_id != 0 {
+		bc, ok := breadcrumb_get(s, ns.host_breadcrumb_id)
+		if !ok || bc.scene_instance != ns.local_id do return {}, 0
+		if !pptr_guid_is_empty(bc.scene_source.guid) do return {}, 0
+		if bc.scene_source.local_id != lid do return {}, 0
+	}
 	w := ctx_world()
 	first: Transform_Handle = {}
 	n := 0
@@ -444,12 +492,6 @@ _nested_scene_scan_hosts_for_lid :: proc(s: ^Scene, ns: ^NestedScene, lid: Local
 		if ns.expand_parent != {} {
 			if !tt.nested_owned do continue
 			if !_transform_is_descendant_or_self(tH, ns.expand_parent) do continue
-		}
-		if ns.host_breadcrumb_id != 0 {
-			bc, ok := breadcrumb_get(s, ns.host_breadcrumb_id)
-			if !ok || bc.scene_instance != ns.local_id do continue
-			if !pptr_guid_is_empty(bc.scene_source.guid) do continue
-			if bc.scene_source.local_id != lid do continue
 		}
 		if n == 0 do first = tH
 		n += 1
@@ -483,8 +525,7 @@ nested_scene_hosts_transform :: proc(s: ^Scene, ns: ^NestedScene, host_tH: Trans
 		if !pptr_guid_is_empty(bc.scene_source.guid) do return false
 		lid := bc.scene_source.local_id
 
-		oh := pool_get(&ctx_world().transforms, Handle(host_tH))
-		if oh != nil && !oh.nested_owned {
+		if !t.nested_owned {
 			if dir := nested_row_direct_for_host(s, host_tH); dir != nil {
 				if ns.source_prefab != dir.source_prefab {
 					return false
@@ -492,9 +533,17 @@ nested_scene_hosts_transform :: proc(s: ^Scene, ns: ^NestedScene, host_tH: Trans
 			}
 		}
 
-		if oh != nil && oh.nested_owned && oh.local_id == lid {
+		if t.nested_owned && t.local_id == lid {
 			if ns.expand_parent != {} {
-				return transform_find_nested_host(host_tH) == ns.expand_parent
+				// The descendant-or-self check at the top of this proc already
+				// scoped host_tH to ns.expand_parent's subtree. Within that
+				// subtree, the breadcrumb's scene_source.local_id uniquely
+				// identifies the host transform (each inner NS in the parent
+				// prefab has a distinct transform_parent). transform_find_nested_host
+				// would walk past the immediate inner host all the way to the
+				// outermost native host, which gave wrong answers for chains
+				// 3+ levels deep — so don't use it here.
+				return true
 			}
 			if dir := nested_row_direct_for_host(s, transform_find_nested_host(host_tH)); dir != nil {
 				return ns.source_prefab != dir.source_prefab
@@ -617,28 +666,6 @@ nested_scene_resolve :: proc(host_tH: Transform_Handle) {
         host_scene.nested_scenes[i].expand_parent = host_tH
     }
 
-    // Distribute `ns`'s deep overrides into the inner NS records we just
-    // pulled in. A deep override has a breadcrumb-backed target whose source
-    // PPtr names the inner prefab's GUID + local_id. We look those up and
-    // append a translated override to whichever inner NS matches the
-    // breadcrumb's source_prefab; that inner NS will then apply it when it
-    // gets resolved recursively below.
-    for i in nested_before..<len(host_scene.nested_scenes) {
-        inner_m := &host_scene.nested_scenes[i]
-        for &o in ns.overrides {
-            bc, has_bc := breadcrumb_get(host_scene, o.target)
-            if !has_bc do continue
-            if bc.scene_source.guid != inner_m.source_prefab do continue
-            if bc.scene_instance != ns.local_id do continue
-
-            append(&inner_m.overrides, Override{
-                target        = bc.scene_source.local_id,
-                property_path = strings.clone(o.property_path),
-                value         = json.clone_value(o.value),
-            })
-        }
-    }
-
     nested_root := pool_get(&w.transforms, Handle(nested_root_tH))
     if nested_root == nil do return
 
@@ -682,6 +709,15 @@ nested_scene_resolve :: proc(host_tH: Transform_Handle) {
             _scene_resolve_nested_in_subtree(Transform_Handle(child.handle))
         }
     }
+
+    // Apply deep overrides (those whose breadcrumb has a scene_path through
+    // inner prefabs) by patching the live tree directly. Per docs/NestedPrefabs.md
+    // overrides live at the root scene level only; inner NS records carry their
+    // own prefab-baked overrides but never copies of root's. We locate each
+    // deep target via reflection over the materialized subtree, then run
+    // type_cleanup_by_typeid on the live field to free what's there before
+    // unmarshaling the new JSON value into the same slot.
+    _nested_scene_apply_deep_overrides_live(host_tH, ns)
 }
 
 _mark_subtree_nested_owned :: proc(root_tH: Transform_Handle) {
@@ -704,6 +740,7 @@ _nested_scene_unresolve :: proc(host_tH: Transform_Handle) {
     w := ctx_world()
     host_t := pool_get(&w.transforms, Handle(host_tH))
     if host_t == nil do return
+    s := host_t.scene
 
     to_destroy_children := make([dynamic]Transform_Handle, 0, len(host_t.children), context.temp_allocator)
     for child in host_t.children {
@@ -732,6 +769,41 @@ _nested_scene_unresolve :: proc(host_tH: Transform_Handle) {
     }
     for h in to_remove_comps {
         transform_remove_comp(host_tH, h)
+    }
+
+    // Drop inner NS records whose expand_parent was in the subtree we just
+    // destroyed. Without this, _scene_load_as_child will re-clone fresh inner
+    // NS records (with new expand_parent values) on the next resolve, leaving
+    // the old ones as zombies in s.nested_scenes — they'd shadow the fresh
+    // ones in chain walks and break subsequent resolves.
+    if s != nil {
+        write := 0
+        for i in 0 ..< len(s.nested_scenes) {
+            ns := s.nested_scenes[i]
+            // Native NS records (expand_parent == {}) are persistent metadata —
+            // never drop them here.
+            if ns.expand_parent == {} {
+                s.nested_scenes[write] = ns
+                write += 1
+                continue
+            }
+            // Stale if the host transform it was anchored to no longer exists,
+            // OR if it was anchored under host_tH (we just destroyed those).
+            ep := ns.expand_parent
+            ep_valid := pool_valid(&w.transforms, Handle(ep))
+            if !ep_valid {
+                breadcrumb_clear_for_nested_scene(s, ns.local_id)
+                for &ov in ns.overrides {
+                    delete(ov.property_path)
+                    json.destroy_value(ov.value)
+                }
+                delete(ns.overrides)
+                continue
+            }
+            s.nested_scenes[write] = ns
+            write += 1
+        }
+        resize(&s.nested_scenes, write)
     }
 }
 
@@ -764,6 +836,118 @@ nested_scene_has_override :: proc(ns: ^NestedScene, target_id: Local_ID, propert
     return false
 }
 
+// Walks from `inner_host_tH` up the chain of expand_parent hosts to the root
+// native NS, collecting (prefab_guid, transform_parent) hops along the way.
+// Returns the root NS and the chain hops (top-down: chain[0] is the hop from
+// the root NS into the next inner level; chain[last] is the hop into
+// `inner_host_tH`'s NS). For native hosts (no chain) returns chain==nil.
+//
+// Caller owns the returned dynamic array (allocated in `allocator`).
+@(private = "file")
+_nested_chain_to_root :: proc(
+    s: ^Scene,
+    inner_host_tH: Transform_Handle,
+    allocator := context.temp_allocator,
+) -> (^NestedScene, [dynamic]PPtr, bool) {
+    if s == nil do return nil, nil, false
+    inner_ns := scene_find_nested_scene_for_host(s, inner_host_tH)
+    if inner_ns == nil do return nil, nil, false
+    if inner_ns.expand_parent == {} {
+        return inner_ns, nil, true
+    }
+    chain := make([dynamic]PPtr, 0, 4, allocator)
+    cur := inner_ns
+    for _ in 0 ..< 64 {
+        append(&chain, PPtr{guid = cur.source_prefab, local_id = cur.transform_parent})
+        ep := cur.expand_parent
+        if ep == {} do break
+        outer := scene_find_nested_scene_for_host(s, ep)
+        if outer == nil do return nil, chain, false
+        if outer.expand_parent == {} {
+            // outer is native — reverse chain to top-down and return.
+            n := len(chain)
+            for i in 0 ..< n / 2 {
+                chain[i], chain[n - 1 - i] = chain[n - 1 - i], chain[i]
+            }
+            return outer, chain, true
+        }
+        cur = outer
+    }
+    return nil, chain, false
+}
+
+// For a UI context where the user is inspecting a transform/component inside a
+// nested-owned subtree, returns the root native NS and the breadcrumb-keyed
+// override target that root holds (or would hold) for `(target_lid,
+// property_path)` — `target_lid` is in `inner_host_tH`'s prefab namespace.
+// If the host IS native, returns (root_ns, target_lid) directly. If a matching
+// breadcrumb already exists on root, returns its local_id; otherwise returns
+// 0 in the second value (meaning "no breadcrumb yet — caller would need to
+// create one before applying an override"; for has_override / revert lookups
+// the absence means "no override").
+nested_scene_locate_root_override :: proc(
+    s: ^Scene,
+    inner_host_tH: Transform_Handle,
+    target_lid: Local_ID,
+) -> (^NestedScene, Local_ID, bool) {
+    if s == nil do return nil, 0, false
+    root_ns, chain, ok := _nested_chain_to_root(s, inner_host_tH)
+    if !ok || root_ns == nil do return nil, 0, false
+
+    // Native host case: target lid is directly in the root NS prefab namespace.
+    if len(chain) == 0 {
+        return root_ns, target_lid, true
+    }
+
+    // Deep case: find the breadcrumb on root that points to (chain, target_lid)
+    // in the leaf prefab namespace (chain[last].guid). Per the encoding used
+    // by scene_file.odin/_capture_overrides_to_native, scene_path == chain and
+    // scene_source = {guid = leaf_prefab_guid, local_id = target_lid}.
+    leaf_guid := chain[len(chain) - 1].guid
+    src := PPtr{guid = leaf_guid, local_id = target_lid}
+    for _, bc in s.breadcrumb_data {
+        if bc.scene_instance != root_ns.local_id do continue
+        if !pptr_equals(bc.scene_source, src) do continue
+        if !_breadcrumb_path_equals(bc.scene_path, chain[:]) do continue
+        return root_ns, bc.local_id, true
+    }
+    return root_ns, 0, true
+}
+
+// Checks whether root scene has an override on (target_lid, property_path) for
+// a transform/component that lives inside `inner_host_tH`'s nested subtree.
+// Walks the chain to root and looks at the root NS's overrides list (matched
+// either by direct lid for native hosts or by breadcrumb for deep).
+nested_scene_has_root_override :: proc(
+    s: ^Scene,
+    inner_host_tH: Transform_Handle,
+    target_lid: Local_ID,
+    property_path: string,
+) -> bool {
+    root_ns, target, ok := nested_scene_locate_root_override(s, inner_host_tH, target_lid)
+    if !ok || root_ns == nil do return false
+    if target == 0 do return false
+    return nested_scene_has_override(root_ns, target, property_path)
+}
+
+// Like nested_scene_has_root_override but returns true if the root NS has ANY
+// override on `target_lid` regardless of property_path. Used for the "is any
+// field on this transform/component overridden by root scene" check that
+// drives component-header coloring.
+nested_scene_has_any_root_override_for_target :: proc(
+    s: ^Scene,
+    inner_host_tH: Transform_Handle,
+    target_lid: Local_ID,
+) -> bool {
+    root_ns, target, ok := nested_scene_locate_root_override(s, inner_host_tH, target_lid)
+    if !ok || root_ns == nil do return false
+    if target == 0 do return false
+    for &ov in root_ns.overrides {
+        if ov.target == target do return true
+    }
+    return false
+}
+
 _nested_revert_field_ptr :: proc(ptr: rawptr, tid: typeid, path: string) -> (rawptr, typeid, bool) {
     dot := strings.index_byte(path, '.')
     key := path if dot < 0 else path[:dot]
@@ -779,112 +963,525 @@ _nested_revert_field_ptr :: proc(ptr: rawptr, tid: typeid, path: string) -> (raw
     return nil, nil, false
 }
 
-nested_scene_revert_override :: proc(ns: ^NestedScene, target_id: Local_ID, property_path: string) {
-    if ns == nil do return
-
+// Walks the nested-owned subtree under `host_tH` (and the host itself), looking
+// for a transform or component whose `local_id == target_id`. Returns a pointer
+// into the live data for the property at `property_path`. Scoping the search
+// to one host's subtree is what makes this safe when multiple instances of the
+// same prefab share local_ids — picking by local_id alone would otherwise hit
+// a sibling instance.
+@(private = "file")
+_nested_find_revert_target :: proc(
+    host_tH: Transform_Handle,
+    target_id: Local_ID,
+    property_path: string,
+    is_root_target: bool,
+    revert_field_ptr: rawptr,
+) -> (rawptr, typeid, bool) {
+    if host_tH == {} do return nil, nil, false
     w := ctx_world()
 
-    live_ptr: rawptr
-    live_tid: typeid
-    found := false
+    walk :: proc(
+        w: ^World,
+        tH: Transform_Handle,
+        target_id: Local_ID,
+        property_path: string,
+        is_root_target: bool,
+        is_host: bool,
+        revert_field_ptr: rawptr,
+    ) -> (rawptr, typeid, bool) {
+        t := pool_get(&w.transforms, Handle(tH))
+        if t == nil do return nil, nil, false
 
-    for i in 0..<len(w.transforms.slots) {
-        slot := &w.transforms.slots[i]
-        if !slot.alive do continue
-        t := &slot.data
-        is_target := t.local_id == target_id && t.nested_owned
-        is_host    := target_id == ns.source_root_id && t.local_id == ns.transform_parent
-        if !is_target && !is_host do continue
-        field_ptr, field_tid, ok := _nested_revert_field_ptr(t, Transform, property_path)
+        match_self := false
+        if is_host {
+            if is_root_target do match_self = true
+        } else if t.nested_owned && t.local_id == target_id {
+            match_self = true
+        }
+
+        if match_self {
+            if fp, ftid, ok := _nested_revert_field_ptr(t, Transform, property_path); ok {
+                if revert_field_ptr == nil || uintptr(revert_field_ptr) == uintptr(fp) {
+                    return fp, ftid, true
+                }
+            }
+            for c in t.components {
+                if c.handle.type_key == INVALID_TYPE_KEY do continue
+                comp_ptr := world_pool_get(w, c.handle)
+                if comp_ptr == nil do continue
+                base := cast(^CompData)comp_ptr
+                if !base.nested_owned do continue
+                comp_tid := get_typeid_by_type_key(c.handle.type_key)
+                if comp_tid == nil do continue
+                if fp, ftid, ok := _nested_revert_field_ptr(comp_ptr, comp_tid, property_path); ok {
+                    if revert_field_ptr == nil || uintptr(revert_field_ptr) == uintptr(fp) {
+                        return fp, ftid, true
+                    }
+                }
+            }
+        } else if !is_host && t.nested_owned {
+            for c in t.components {
+                if c.handle.type_key == INVALID_TYPE_KEY do continue
+                comp_ptr := world_pool_get(w, c.handle)
+                if comp_ptr == nil do continue
+                base := cast(^CompData)comp_ptr
+                if !base.nested_owned do continue
+                if base.local_id != target_id do continue
+                comp_tid := get_typeid_by_type_key(c.handle.type_key)
+                if comp_tid == nil do continue
+                if fp, ftid, ok := _nested_revert_field_ptr(comp_ptr, comp_tid, property_path); ok {
+                    if revert_field_ptr == nil || uintptr(revert_field_ptr) == uintptr(fp) {
+                        return fp, ftid, true
+                    }
+                }
+            }
+        }
+
+        for child in t.children {
+            ct := pool_get(&w.transforms, child.handle)
+            if ct == nil do continue
+            if !ct.nested_owned do continue
+            cth := Transform_Handle(child.handle)
+            if fp, ftid, ok := walk(w, cth, target_id, property_path, is_root_target, false, revert_field_ptr); ok {
+                return fp, ftid, true
+            }
+        }
+
+        if is_host {
+            for c in t.components {
+                if c.handle.type_key == INVALID_TYPE_KEY do continue
+                comp_ptr := world_pool_get(w, c.handle)
+                if comp_ptr == nil do continue
+                base := cast(^CompData)comp_ptr
+                if !base.nested_owned do continue
+                if base.local_id != target_id do continue
+                comp_tid := get_typeid_by_type_key(c.handle.type_key)
+                if comp_tid == nil do continue
+                if fp, ftid, ok := _nested_revert_field_ptr(comp_ptr, comp_tid, property_path); ok {
+                    if revert_field_ptr == nil || uintptr(revert_field_ptr) == uintptr(fp) {
+                        return fp, ftid, true
+                    }
+                }
+            }
+        }
+
+        return nil, nil, false
+    }
+
+    return walk(w, host_tH, target_id, property_path, is_root_target, true, revert_field_ptr)
+}
+
+// Walks `bc.scene_path` starting from `native_host_tH` to find the live host
+// transform of the innermost inner NS that wraps the deep override's target.
+// `bc.scene_path` is top-down: chain[0] is the hop from the native NS into the
+// next inner level, chain[last] is the hop into the leaf inner NS whose prefab
+// contains the actual target lid. Returns the leaf inner host_tH and the leaf
+// NS pointer so the caller can compute is_root_target. Returns ({},nil) when
+// any hop can't be matched (chain is stale or the corresponding inner NS hasn't
+// been materialized yet).
+@(private = "file")
+_nested_walk_breadcrumb_chain :: proc(
+    s: ^Scene,
+    native_host_tH: Transform_Handle,
+    bc: ^Breadcrumb,
+) -> (Transform_Handle, ^NestedScene) {
+    if s == nil || bc == nil do return {}, nil
+    if len(bc.scene_path) == 0 do return {}, nil
+
+    cur_host := native_host_tH
+    cur_outer_ns: ^NestedScene = nil
+    {
+        if t := pool_get(&ctx_world().transforms, Handle(cur_host)); t != nil {
+            cur_outer_ns = scene_find_nested_scene_for_host(s, cur_host)
+        }
+    }
+    if cur_outer_ns == nil do return {}, nil
+
+    for hop, hop_idx in bc.scene_path {
+        // Find inner NS in `s` whose source_prefab == hop.guid,
+        // transform_parent == hop.local_id (within the parent prefab namespace),
+        // and expand_parent is the current host. This matches one level of
+        // nesting at a time.
+        found: ^NestedScene = nil
+        for &cand in s.nested_scenes {
+            if cand.source_prefab != hop.guid do continue
+            if cand.transform_parent != hop.local_id do continue
+            if cand.expand_parent != cur_host do continue
+            found = &cand
+            break
+        }
+        if found == nil do return {}, nil
+
+        next_host := nested_scene_resolve_host_handle(s, found)
+        if next_host == {} do return {}, nil
+        cur_host = next_host
+        cur_outer_ns = found
+        _ = hop_idx
+    }
+
+    return cur_host, cur_outer_ns
+}
+
+// Patches the live field at `(target_id, property_path)` inside `host_tH`'s
+// subtree using `value` JSON. `cleanup_T` (registered as `type_cleanup_by_typeid`)
+// is contracted to free + zero the field, so unmarshal_any sees a valid empty
+// slot. Returns true on success. Logs and returns false when the locate fails
+// or the field type has no registered pointer typeid.
+@(private = "file")
+_nested_patch_live_field :: proc(
+    host_tH: Transform_Handle,
+    target_id: Local_ID,
+    property_path: string,
+    is_root_target: bool,
+    value: json.Value,
+) -> bool {
+    live_ptr, live_tid, found := _nested_find_revert_target(host_tH, target_id, property_path, is_root_target, nil)
+    if !found || live_ptr == nil do return false
+
+    field_bytes, merr := json.marshal(value, {spec = .JSON}, context.temp_allocator)
+    if merr != nil do return false
+
+    type_cleanup_by_typeid(live_tid, live_ptr)
+    ptr_tid, ptr_ok := get_pointer_typeid_by_typeid(live_tid)
+    if !ptr_ok do return false
+    if uerr := json.unmarshal_any(field_bytes, any{&live_ptr, ptr_tid}); uerr != nil do return false
+    return true
+}
+
+// Iterates root NS's `overrides`, applies the deep ones (those targeting via a
+// breadcrumb with non-empty scene_path, plus legacy depth-2 entries whose
+// breadcrumb guid differs from the NS's own prefab) by patching the live tree.
+// Shallow overrides (target lid is in ns.source_prefab namespace and was already
+// folded in by `nested_scene_apply_overrides` during bake) are skipped here.
+@(private = "file")
+_nested_scene_apply_deep_overrides_live :: proc(host_tH: Transform_Handle, ns: ^NestedScene) {
+    if ns == nil do return
+    w := ctx_world()
+    host_t := pool_get(&w.transforms, Handle(host_tH))
+    if host_t == nil do return
+    s := host_t.scene
+    if s == nil do return
+
+    for &ov in ns.overrides {
+        bc, has_bc := breadcrumb_get(s, ov.target)
+        if !has_bc do continue
+        if bc.scene_instance != ns.local_id do continue
+
+        if len(bc.scene_path) == 0 {
+            // Legacy depth-2 encoding. If the breadcrumb's guid matches ns's
+            // own prefab, it's actually a shallow override (already baked).
+            // Otherwise it's a depth-2 deep override; locate the inner NS
+            // whose source_prefab matches.
+            if bc.scene_source.guid == ns.source_prefab do continue
+            if pptr_guid_is_empty(bc.scene_source.guid) do continue
+
+            inner_ns: ^NestedScene = nil
+            for &cand in s.nested_scenes {
+                if cand.source_prefab != bc.scene_source.guid do continue
+                if cand.expand_parent != host_tH do continue
+                inner_ns = &cand
+                break
+            }
+            if inner_ns == nil do continue
+            inner_host := nested_scene_resolve_host_handle(s, inner_ns)
+            if inner_host == {} do continue
+            is_root_target := bc.scene_source.local_id == inner_ns.source_root_id
+            _nested_patch_live_field(inner_host, bc.scene_source.local_id, ov.property_path, is_root_target, ov.value)
+            continue
+        }
+
+        bc_copy := bc
+        leaf_host, leaf_ns := _nested_walk_breadcrumb_chain(s, host_tH, &bc_copy)
+        if leaf_host == {} || leaf_ns == nil do continue
+        is_root_target := bc.scene_source.local_id == leaf_ns.source_root_id
+        _nested_patch_live_field(leaf_host, bc.scene_source.local_id, ov.property_path, is_root_target, ov.value)
+    }
+}
+
+// Computes a "revert baseline" for one override: the value the field would
+// take if `ns.overrides` did not contain `(target_id, property_path)`. Used by
+// `nested_scene_revert_override`. For shallow overrides this is the field
+// value in the prefab raw with all OTHER ns.overrides applied. For deep
+// overrides, the leaf prefab raw is the base — that prefab's own NS records
+// (loaded recursively) plus the parent prefab files' NS-for-this-child
+// overrides have already been baked into the live state, but those live in
+// other prefab files, not on `ns`. The revert value must include them. We
+// solve this generically by re-baking all the chain prefabs in JSON, applying
+// each level's own overrides (read from disk) plus root's other overrides
+// (everything in ns.overrides minus the one being reverted), then reading the
+// field at the bottom of the chain.
+//
+// Caller owns the returned bytes; delete after use.
+@(private = "file")
+_nested_revert_baseline_field_json :: proc(
+    s: ^Scene,
+    ns: ^NestedScene,
+    target_id: Local_ID,
+    property_path: string,
+) -> (json.Value, bool) {
+    if s == nil || ns == nil do return nil, false
+
+    raw, has := scene_lib[ns.source_prefab]
+    if !has {
+        if !scene_lib_register(ns.source_prefab) do return nil, false
+        raw, has = scene_lib[ns.source_prefab]
+        if !has do return nil, false
+    }
+
+    // Build "ns.overrides minus the one being reverted" so the rebuilt bake
+    // reflects all peer overrides.
+    others := make([dynamic]Override, 0, len(ns.overrides), context.temp_allocator)
+    for ov in ns.overrides {
+        if ov.target == target_id && ov.property_path == property_path do continue
+        append(&others, ov)
+    }
+
+    bc, has_bc := breadcrumb_get(s, target_id)
+    is_deep := has_bc && (len(bc.scene_path) > 0 || (!pptr_guid_is_empty(bc.scene_source.guid) && bc.scene_source.guid != ns.source_prefab))
+
+    if !is_deep {
+        // Shallow: bake ns.source_prefab with peer overrides, find target_id row,
+        // read property_path from it.
+        baked := nested_scene_apply_overrides(raw, others[:])
+        defer if raw_data(baked) != raw_data(raw) do delete(baked)
+
+        baked_copy := make([]byte, len(baked), context.temp_allocator)
+        copy(baked_copy, baked)
+        root_val: json.Value
+        if json.unmarshal_string(string(baked_copy), &root_val) != nil do return nil, false
+        defer json.destroy_value(root_val)
+        root_obj, is_obj := root_val.(json.Object)
+        if !is_obj do return nil, false
+
+        for _, section_val in root_obj {
+            arr, is_arr := section_val.(json.Array)
+            if !is_arr do continue
+            for item in arr {
+                obj, ok := item.(json.Object)
+                if !ok do continue
+                lid, lid_ok := _json_local_id_of(obj)
+                if !lid_ok || lid != target_id do continue
+                field_val, fok := _json_get_path(obj, property_path)
+                if !fok do return nil, false
+                return json.clone_value(field_val), true
+            }
+        }
+        return nil, false
+    }
+
+    // Deep: walk the breadcrumb chain, accumulating the leaf prefab's bake.
+    // For each hop we load that prefab file, find the inner NS-for-next-hop
+    // record in its `nested_scenes`, and apply its overrides to the next
+    // prefab's raw. The result at the bottom is the leaf prefab's bake with
+    // every level's overrides already in. Then root's deep override (the one
+    // being reverted) is the only thing that *would* differ — and we're
+    // omitting it, so this bake is exactly the revert baseline.
+    leaf_guid := bc.scene_source.guid
+    leaf_target := bc.scene_source.local_id
+    if pptr_guid_is_empty(leaf_guid) do return nil, false
+
+    // Build an "outer prefab guid -> next prefab guid + transform_parent" map
+    // by replaying the chain. chain[0] is the hop INTO the first inner level
+    // from ns.source_prefab.
+    Hop :: struct { guid: Asset_GUID, transform_parent: Local_ID }
+    hops := make([dynamic]Hop, 0, len(bc.scene_path) + 1, context.temp_allocator)
+    if len(bc.scene_path) > 0 {
+        for h in bc.scene_path {
+            append(&hops, Hop{guid = h.guid, transform_parent = h.local_id})
+        }
+    } else {
+        // Legacy depth-2: the only hop is INTO leaf_guid. The transform_parent
+        // is unknown at the root level; locate it via the inner NS record.
+        for &cand in s.nested_scenes {
+            if cand.source_prefab != leaf_guid do continue
+            if cand.expand_parent != nested_scene_resolve_host_handle(s, ns) do continue
+            append(&hops, Hop{guid = leaf_guid, transform_parent = cand.transform_parent})
+            break
+        }
+        if len(hops) == 0 do return nil, false
+    }
+
+    // Bake ns.source_prefab with peer overrides → find its NS-for-hop[0] → that
+    // NS's overrides go onto hop[0].guid raw. Repeat until leaf.
+    cur_raw := raw
+    cur_owns := false
+    {
+        baked := nested_scene_apply_overrides(raw, others[:])
+        if raw_data(baked) != raw_data(raw) {
+            cur_raw = baked
+            cur_owns = true
+        }
+    }
+    defer if cur_owns do delete(cur_raw)
+
+    // For each hop, find that hop's inner NS-records in cur_raw, get its
+    // overrides, then bake the next prefab's raw with those overrides. Move
+    // cur_raw forward.
+    for i in 0 ..< len(hops) {
+        cur_copy := make([]byte, len(cur_raw), context.temp_allocator)
+        copy(cur_copy, cur_raw)
+        cur_sf: SceneFile
+        if json.unmarshal(cur_copy, &cur_sf) != nil do return nil, false
+
+        hop := hops[i]
+        next_raw_disk, has_next := scene_lib[hop.guid]
+        if !has_next {
+            if !scene_lib_register(hop.guid) {
+                scene_file_destroy(&cur_sf)
+                return nil, false
+            }
+            next_raw_disk, has_next = scene_lib[hop.guid]
+            if !has_next {
+                scene_file_destroy(&cur_sf)
+                return nil, false
+            }
+        }
+
+        // Find inner NS in cur_sf that targets hop.
+        var_overrides: []Override = nil
+        for &m in cur_sf.nested_scenes {
+            if m.source_prefab != hop.guid do continue
+            if m.transform_parent != hop.transform_parent do continue
+            var_overrides = m.overrides[:]
+            break
+        }
+
+        next_baked := nested_scene_apply_overrides(next_raw_disk, var_overrides)
+        next_owns := raw_data(next_baked) != raw_data(next_raw_disk)
+
+        // Copy next_baked to a buffer that survives cur_sf destruction.
+        if next_owns {
+            // already an owned heap allocation; transfer ownership.
+            if cur_owns do delete(cur_raw)
+            cur_raw = next_baked
+            cur_owns = true
+        } else {
+            // next_baked aliases next_raw_disk (no overrides applied).
+            // Make a copy so it survives cur_sf destruction (which doesn't
+            // affect the scene_lib backing, but we want uniform ownership).
+            buf := make([]byte, len(next_baked))
+            copy(buf, next_baked)
+            if cur_owns do delete(cur_raw)
+            cur_raw = buf
+            cur_owns = true
+        }
+
+        scene_file_destroy(&cur_sf)
+    }
+
+    // cur_raw is now the leaf prefab baked. Read leaf_target's property_path.
+    leaf_copy := make([]byte, len(cur_raw), context.temp_allocator)
+    copy(leaf_copy, cur_raw)
+    leaf_val: json.Value
+    if json.unmarshal_string(string(leaf_copy), &leaf_val) != nil do return nil, false
+    defer json.destroy_value(leaf_val)
+    leaf_root, is_obj := leaf_val.(json.Object)
+    if !is_obj do return nil, false
+
+    for _, section_val in leaf_root {
+        arr, is_arr := section_val.(json.Array)
+        if !is_arr do continue
+        for item in arr {
+            obj, ok := item.(json.Object)
+            if !ok do continue
+            lid, lid_ok := _json_local_id_of(obj)
+            if !lid_ok || lid != leaf_target do continue
+            field_val, fok := _json_get_path(obj, property_path)
+            if !fok do return nil, false
+            return json.clone_value(field_val), true
+        }
+    }
+    _ = leaf_target
+    return nil, false
+}
+
+nested_scene_revert_override :: proc(
+    s: ^Scene,
+    ns: ^NestedScene,
+    target_id: Local_ID,
+    property_path: string,
+    revert_field_ptr: rawptr = nil,
+) {
+    if s == nil || ns == nil do return
+
+    has_match := false
+    for &ov in ns.overrides {
+        if ov.target == target_id && ov.property_path == property_path {
+            has_match = true
+            break
+        }
+    }
+    if !has_match do return
+
+    // Locate the live field. For deep overrides target_id is a breadcrumb
+    // local_id; resolve it to the leaf inner host so the locator searches the
+    // right subtree.
+    native_host_tH := nested_scene_resolve_host_handle(s, ns)
+    leaf_host_tH := native_host_tH
+    leaf_target := target_id
+    is_root_target := target_id == ns.source_root_id
+
+    if bc, has_bc := breadcrumb_get(s, target_id); has_bc {
+        if len(bc.scene_path) > 0 {
+            bc_copy := bc
+            lh, leaf_ns := _nested_walk_breadcrumb_chain(s, native_host_tH, &bc_copy)
+            if lh != {} && leaf_ns != nil {
+                leaf_host_tH = lh
+                leaf_target = bc.scene_source.local_id
+                is_root_target = bc.scene_source.local_id == leaf_ns.source_root_id
+            }
+        } else if !pptr_guid_is_empty(bc.scene_source.guid) && bc.scene_source.guid != ns.source_prefab {
+            // Legacy depth-2 deep override.
+            for &cand in s.nested_scenes {
+                if cand.source_prefab != bc.scene_source.guid do continue
+                if cand.expand_parent != native_host_tH do continue
+                inner_host := nested_scene_resolve_host_handle(s, &cand)
+                if inner_host == {} do continue
+                leaf_host_tH = inner_host
+                leaf_target = bc.scene_source.local_id
+                is_root_target = bc.scene_source.local_id == cand.source_root_id
+                break
+            }
+        }
+    }
+
+    live_ptr, live_tid, found := _nested_find_revert_target(
+        leaf_host_tH,
+        leaf_target,
+        property_path,
+        is_root_target,
+        revert_field_ptr,
+    )
+
+    if found && live_ptr != nil {
+        baseline, ok := _nested_revert_baseline_field_json(s, ns, target_id, property_path)
         if ok {
-            live_ptr = field_ptr
-            live_tid = field_tid
-            found = true
-        }
-        break
-    }
-
-    if !found {
-        for tk in TypeKey {
-            if tk == INVALID_TYPE_KEY || tk == .Transform do continue
-            entry := w.pool_table[tk]
-            if entry.get_fn == nil do continue
-            comp_tid := get_typeid_by_type_key(tk)
-            if comp_tid == nil do continue
-            for i in 0..<len(w.transforms.slots) {
-                slot := &w.transforms.slots[i]
-                if !slot.alive do continue
-                for c in slot.data.components {
-                    if c.handle.type_key != tk do continue
-                    comp_ptr := world_pool_get(w, c.handle)
-                    if comp_ptr == nil do continue
-                    base := cast(^CompData)comp_ptr
-                    if base.local_id != target_id do continue
-                    field_ptr, field_tid, ok := _nested_revert_field_ptr(comp_ptr, comp_tid, property_path)
-                    if ok {
-                        live_ptr = field_ptr
-                        live_tid = field_tid
-                        found = true
-                    }
-                    break
+            defer json.destroy_value(baseline)
+            field_bytes, merr := json.marshal(baseline, {spec = .JSON}, context.temp_allocator)
+            if merr == nil {
+                type_cleanup_by_typeid(live_tid, live_ptr)
+                if ptr_tid, ptr_ok := get_pointer_typeid_by_typeid(live_tid); ptr_ok {
+                    json.unmarshal_any(field_bytes, any{&live_ptr, ptr_tid})
                 }
-                if found do break
             }
-            if found do break
         }
     }
 
+    // Remove ALL matching entries. Duplicate (target, property_path) records
+    // can only exist from stale data; leaving any behind would keep the field
+    // visually flagged as overridden and require another revert click.
+    write := 0
     for i in 0..<len(ns.overrides) {
-        ov := &ns.overrides[i]
-        if ov.target != target_id || ov.property_path != property_path do continue
-
-        if found && live_ptr != nil {
-            base_raw, has_base := scene_lib[ns.source_prefab]
-            if has_base {
-                base_copy := make([]byte, len(base_raw))
-                defer delete(base_copy)
-                copy(base_copy, base_raw)
-                base_val: json.Value
-                if json.unmarshal_string(string(base_copy), &base_val) == nil {
-                    defer json.destroy_value(base_val)
-                    base_root, is_obj := base_val.(json.Object)
-                    if is_obj {
-                        find_by_id :: proc(arr: json.Array, id: Local_ID) -> (json.Object, bool) {
-                            for item in arr {
-                                obj, ok := item.(json.Object)
-                                if !ok do continue
-                                lid, lid_ok := _json_local_id_of(obj)
-                                if lid_ok && lid == id do return obj, true
-                            }
-                            return {}, false
-                        }
-                        for _, section_val in base_root {
-                            arr, is_arr := section_val.(json.Array)
-                            if !is_arr do continue
-                            item_obj, item_found := find_by_id(arr, target_id)
-                            if !item_found do continue
-                            base_field_json, path_ok := _json_get_path(item_obj, property_path)
-                            if path_ok {
-                                if field_bytes, merr := json.marshal(base_field_json, {spec = .JSON}); merr == nil {
-                                    defer delete(field_bytes)
-                                    type_cleanup_by_typeid(live_tid, live_ptr)
-                                    if ptr_tid, ptr_ok := get_pointer_typeid_by_typeid(live_tid); ptr_ok {
-                                        json.unmarshal_any(field_bytes, any{&live_ptr, ptr_tid})
-                                    }
-                                }
-                            }
-                            break
-                        }
-                    }
-                }
-            }
+        ov := ns.overrides[i]
+        if ov.target == target_id && ov.property_path == property_path {
+            delete(ov.property_path)
+            json.destroy_value(ov.value)
+            continue
         }
-
-        delete(ov.property_path)
-        json.destroy_value(ov.value)
-        ordered_remove(&ns.overrides, i)
-        return
+        ns.overrides[write] = ov
+        write += 1
     }
+    resize(&ns.overrides, write)
 }
 
 nested_scene_add :: proc(s: ^Scene, source_prefab: Asset_GUID, host_tH: Transform_Handle, sibling_index: int) -> ^NestedScene {
@@ -902,6 +1499,109 @@ nested_scene_add :: proc(s: ^Scene, source_prefab: Asset_GUID, host_tH: Transfor
     ns_ptr := &s.nested_scenes[len(s.nested_scenes) - 1]
     nested_scene_attach_host_breadcrumb(s, ns_ptr, t.local_id)
     return ns_ptr
+}
+
+// Strips nested-scene metadata from `host_tH`'s subtree, leaving plain
+// transforms/components in place. Used for runtime instantiation: the
+// override-baked content from `nested_scene_resolve` is kept, but the
+// NestedScene records, breadcrumbs, and `nested_owned` flags are dropped so
+// the spawned subtree behaves like a flat hierarchy with no editor bookkeeping.
+nested_scene_unpack_subtree :: proc(host_tH: Transform_Handle) {
+    w := ctx_world()
+    ht := pool_get(&w.transforms, Handle(host_tH))
+    if ht == nil do return
+    s := ht.scene
+    if s == nil do return
+
+    // Clear nested-owned flags AND renumber transforms/components with fresh
+    // scene-unique local_ids. The resolved subtree carries lids from multiple
+    // prefab namespaces (e.g. bullet's "Transform" lid=2 alongside c.scene's
+    // own lid=2), which is fine while they're nested-owned because they aren't
+    // registered in s.local_ids — but scene_copy_subtree serializes them by
+    // their `local_id` field, producing JSON with duplicate ids that break
+    // _scene_file_remap_local_ids on every subsequent paste.
+    renumber :: proc(w: ^World, tH: Transform_Handle, s: ^Scene) {
+        t := pool_get(&w.transforms, Handle(tH))
+        if t == nil do return
+        t.nested_owned = false
+
+        new_lid := scene_next_id(s)
+        bimap_remove_by_val(&s.local_ids, Handle(tH))
+        if pool_valid(&w.transforms, t.parent.handle) {
+            pt := pool_get(&w.transforms, t.parent.handle)
+            if pt != nil {
+                for &child in pt.children {
+                    if child.handle == Handle(tH) {
+                        child.pptr.local_id = new_lid
+                        break
+                    }
+                }
+            }
+        }
+        for child in t.children {
+            ct := pool_get(&w.transforms, child.handle)
+            if ct == nil do continue
+            if ct.parent.pptr.local_id == t.local_id {
+                ct.parent.pptr.local_id = new_lid
+            }
+        }
+        t.local_id = new_lid
+        bimap_insert(&s.local_ids, new_lid, Handle(tH))
+
+        for &c in t.components {
+            if c.handle.type_key == INVALID_TYPE_KEY do continue
+            if !world_pool_valid(w, c.handle) do continue
+            raw := world_pool_get(w, c.handle)
+            if raw == nil do continue
+            base := cast(^CompData)raw
+            base.nested_owned = false
+            new_clid := scene_next_id(s)
+            bimap_remove_by_val(&s.local_ids, c.handle)
+            base.local_id = new_clid
+            c.local_id = new_clid
+            bimap_insert(&s.local_ids, new_clid, c.handle)
+        }
+
+        for child in t.children {
+            renumber(w, Transform_Handle(child.handle), s)
+        }
+    }
+    renumber(w, host_tH, s)
+
+    is_in_subtree :: proc(w: ^World, tH, root: Transform_Handle) -> bool {
+        cur := tH
+        for cur != {} {
+            if cur == root do return true
+            ct := pool_get(&w.transforms, Handle(cur))
+            if ct == nil do return false
+            cur = Transform_Handle(ct.parent.handle)
+        }
+        return false
+    }
+
+    ns_lids := make([dynamic]Local_ID, 0, 8, context.temp_allocator)
+    for &ns in s.nested_scenes {
+        host := nested_scene_resolve_host_handle(s, &ns)
+        if host == {} do continue
+        if is_in_subtree(w, host, host_tH) {
+            append(&ns_lids, ns.local_id)
+        }
+    }
+
+    for ns_lid in ns_lids {
+        breadcrumb_clear_for_nested_scene(s, ns_lid)
+        for i in 0..<len(s.nested_scenes) {
+            if s.nested_scenes[i].local_id != ns_lid do continue
+            ns := &s.nested_scenes[i]
+            for &ov in ns.overrides {
+                delete(ov.property_path)
+                json.destroy_value(ov.value)
+            }
+            delete(ns.overrides)
+            ordered_remove(&s.nested_scenes, i)
+            break
+        }
+    }
 }
 
 nested_scene_remove :: proc(s: ^Scene, host_tH: Transform_Handle) {
@@ -940,7 +1640,10 @@ breadcrumb_alloc_synthetic_handle :: proc(s: ^Scene) -> Handle {
 
 scene_breadcrumb_put :: proc(s: ^Scene, bc: Breadcrumb) -> bool {
     if s == nil || bc.local_id == 0 do return false
-    if _, had := s.breadcrumb_data[bc.local_id]; had {
+    if existing, had := s.breadcrumb_data[bc.local_id]; had {
+        // Free the previous entry's owned slice — caller is replacing it.
+        e := existing
+        _breadcrumb_dispose(&e)
         bimap_remove_by_key(&s.local_ids, bc.local_id)
     }
     h := breadcrumb_alloc_synthetic_handle(s)
@@ -955,20 +1658,29 @@ breadcrumb_get :: proc(s: ^Scene, placeholder_local_id: Local_ID) -> (Breadcrumb
     return bc, ok
 }
 
-breadcrumb_placeholder :: proc(s: ^Scene, scene_instance: Local_ID, src: PPtr) -> (Local_ID, bool) {
+_breadcrumb_path_equals :: proc(a, b: []PPtr) -> bool {
+    if len(a) != len(b) do return false
+    for i in 0 ..< len(a) {
+        if !pptr_equals(a[i], b[i]) do return false
+    }
+    return true
+}
+
+breadcrumb_placeholder :: proc(s: ^Scene, scene_instance: Local_ID, src: PPtr, path: []PPtr = nil) -> (Local_ID, bool) {
     if s == nil || scene_instance == 0 do return 0, false
     for _, bc in s.breadcrumb_data {
-        if bc.scene_instance == scene_instance && pptr_equals(bc.scene_source, src) {
-            return bc.local_id, true
-        }
+        if bc.scene_instance != scene_instance do continue
+        if !pptr_equals(bc.scene_source, src) do continue
+        if !_breadcrumb_path_equals(bc.scene_path, path) do continue
+        return bc.local_id, true
     }
     return 0, false
 }
 
-breadcrumb_create :: proc(s: ^Scene, scene_instance: Local_ID, src: PPtr) -> (Local_ID, bool) {
+breadcrumb_create :: proc(s: ^Scene, scene_instance: Local_ID, src: PPtr, path: []PPtr = nil) -> (Local_ID, bool) {
     if s == nil || scene_instance == 0 do return 0, false
     if _, ok := scene_nested_scene_by_local_id(s, scene_instance); !ok do return 0, false
-    if ph, ok := breadcrumb_placeholder(s, scene_instance, src); ok {
+    if ph, ok := breadcrumb_placeholder(s, scene_instance, src, path); ok {
         return ph, true
     }
     lid := scene_next_id(s)
@@ -976,6 +1688,7 @@ breadcrumb_create :: proc(s: ^Scene, scene_instance: Local_ID, src: PPtr) -> (Lo
         local_id       = lid,
         scene_source   = src,
         scene_instance = scene_instance,
+        scene_path     = _breadcrumb_clone_path(path),
     }) {
         return 0, false
     }
@@ -994,7 +1707,9 @@ breadcrumb_materialize_target :: proc(s: ^Scene, scene_instance: Local_ID, targe
 
 breadcrumb_remove :: proc(s: ^Scene, placeholder_local_id: Local_ID) -> bool {
     if s == nil || placeholder_local_id == 0 do return false
-    if _, ok := s.breadcrumb_data[placeholder_local_id]; !ok do return false
+    bc, ok := s.breadcrumb_data[placeholder_local_id]
+    if !ok do return false
+    _breadcrumb_dispose(&bc)
     bimap_remove_by_key(&s.local_ids, placeholder_local_id)
     delete_key(&s.breadcrumb_data, placeholder_local_id)
     return true

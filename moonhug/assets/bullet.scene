@@ -1,6 +1,6 @@
 {
   "root": 15,
-  "next_local_id": 6,
+  "next_local_id": 17,
   "transforms": [
     {
       "local_id": 15,
@@ -128,6 +128,7 @@
       "local_id": 6,
       "source_prefab": "55926728-93e5-4684-bf40-2f8c986a6f1b",
       "transform_parent": 5,
+      "host_breadcrumb_id": 7,
       "sibling_index": 0,
       "overrides": [
         {
@@ -141,17 +142,17 @@
         },
         {
           "target": 15,
+          "property_path": "name",
+          "value": "c"
+        },
+        {
+          "target": 15,
           "property_path": "position",
           "value": [
             -1.6000000200000000,
             0.0000000000000000,
             -0.1000000000000000
           ]
-        },
-        {
-          "target": 15,
-          "property_path": "name",
-          "value": "c"
         },
         {
           "target": 2,
@@ -173,15 +174,38 @@
           ]
         },
         {
+          "target": 16,
+          "property_path": "color",
+          "value": [
+            1.0000000000000000,
+            0.9490196100000000,
+            1.0000000000000000,
+            1.0000000000000000
+          ]
+        },
+        {
           "target": 3,
           "property_path": "color",
           "value": [
             0.0000000000000000,
             1.0000000000000000,
-            0.3803921600000000,
+            1.0000000000000000,
             1.0000000000000000
           ]
         }
+      ]
+    }
+  ],
+  "breadcrumbs": [
+    {
+      "local_id": 7,
+      "scene_source": {
+        "local_id": 5,
+        "guid": "00000000-0000-0000-0000-000000000000"
+      },
+      "scene_instance": 6,
+      "scene_path": [
+
       ]
     }
   ],

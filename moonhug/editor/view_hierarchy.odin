@@ -611,15 +611,9 @@ _hierarchy_drop_asset_as_child :: proc(path: string, parent_tH: engine.Transform
 	guid, ok := engine.asset_db_get_guid(path)
 	if !ok do return
 
-	name := filepath.stem(path)
-	new_tH := engine.transform_new(name, parent_tH)
-	w := engine.ctx_world()
-	t := engine.pool_get(&w.transforms, engine.Handle(new_tH))
-	if t != nil {
-		sibling_idx := len(engine.pool_get(&w.transforms, engine.Handle(parent_tH)).children) - 1
-		engine.nested_scene_add(t.scene, engine.Asset_GUID(guid), new_tH, sibling_idx)
-		engine.nested_scene_resolve(new_tH)
-	}
+	new_tH := engine.scene_instantiate_guid_nested(engine.Asset_GUID(guid), parent_tH)
+	if new_tH == {} do return
+
 	undo.record_create(new_tH, parent_tH)
 	_hierarchy_selected = new_tH
 	_hierarchy_force_open = parent_tH

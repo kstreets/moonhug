@@ -36,6 +36,10 @@ scene_destroy :: proc(s: ^Scene) {
 	}
 	delete(s.nested_scenes)
 	cleanup_Bimap(&s.local_ids)
+	for _, bc in s.breadcrumb_data {
+		bc_copy := bc
+		if bc_copy.scene_path != nil do delete(bc_copy.scene_path)
+	}
 	delete(s.breadcrumb_data)
 	s.generation = 0
 	free(s)

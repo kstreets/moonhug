@@ -44,7 +44,11 @@ draw_hierarchy_inspector :: proc() {
 	is_host := engine.scene_find_nested_scene_for_host(t.scene, tH) != nil
 	is_nested := t.nested_owned || is_host
 	if is_nested {
-		host_tH := tH if is_host else engine.transform_nested_enclosing_host(tH)
+		// Immediate host (may itself be nested-owned for chains 2+ levels deep)
+		// — this is the NS record that holds overrides about THIS transform's
+		// prefab-level content. Picking the outermost native host instead would
+		// miss overrides distributed onto inner NS records during resolve.
+		host_tH := tH if is_host else engine.transform_immediate_nested_host(tH)
 		prev_host := engine.inspector_set_nested_host(host_tH)
 		defer engine.inspector_set_nested_host(prev_host)
 		prev_lid := engine.inspector_set_nested_local_id(t.local_id)
@@ -175,10 +179,17 @@ _pop_override_style :: proc(pushed: bool) {
 }
 
 @(private)
-_resolve_override_target_id :: proc(t: ^engine.Transform, host_tH: engine.Transform_Handle) -> engine.Local_ID {
-	if t.nested_owned do return t.local_id
-	ns := _nested_scene_for_host(host_tH)
-	if ns != nil && ns.source_root_id != 0 do return ns.source_root_id
+_resolve_override_target_id :: proc(tH: engine.Transform_Handle, t: ^engine.Transform, host_tH: engine.Transform_Handle) -> engine.Local_ID {
+	// When the inspected transform IS the NS host, the override targets the
+	// prefab's source root id (in the inner prefab's namespace). For descendants,
+	// the live local_id IS the inner-prefab local_id and matches override targets
+	// directly. Discriminating by tH==host_tH (rather than t.nested_owned) is
+	// what lets this work for chains 2+ levels deep where the host transform is
+	// itself nested-owned (it lives inside an outer prefab's expansion).
+	if tH == host_tH {
+		ns := _nested_scene_for_host(host_tH)
+		if ns != nil && ns.source_root_id != 0 do return ns.source_root_id
+	}
 	return t.local_id
 }
 
@@ -187,13 +198,11 @@ _wrap_transform_field_override :: proc(tH: engine.Transform_Handle, t: ^engine.T
 	host_tH := engine.inspector_get_nested_host()
 	is_in_nested_ctx := host_tH != {} && (t.nested_owned || engine.scene_find_nested_scene_for_host(t.scene, tH) != nil)
 
-	ns: ^engine.NestedScene
 	target_id: engine.Local_ID
 	is_overridden := false
 	if is_in_nested_ctx {
-		ns = _nested_scene_for_host(host_tH)
-		target_id = _resolve_override_target_id(t, host_tH)
-		is_overridden = engine.nested_scene_has_override(ns, target_id, prop_path)
+		target_id = _resolve_override_target_id(tH, t, host_tH)
+		is_overridden = engine.nested_scene_has_root_override(t.scene, host_tH, target_id, prop_path)
 	}
 
 	pushed := _push_override_style(is_overridden)
@@ -215,13 +224,11 @@ _wrap_transform_rotation_override :: proc(tH: engine.Transform_Handle, t: ^engin
 	host_tH := engine.inspector_get_nested_host()
 	is_in_nested_ctx := host_tH != {} && (t.nested_owned || engine.scene_find_nested_scene_for_host(t.scene, tH) != nil)
 
-	ns: ^engine.NestedScene
 	target_id: engine.Local_ID
 	is_overridden := false
 	if is_in_nested_ctx {
-		ns = _nested_scene_for_host(host_tH)
-		target_id = _resolve_override_target_id(t, host_tH)
-		is_overridden = engine.nested_scene_has_override(ns, target_id, "rotation")
+		target_id = _resolve_override_target_id(tH, t, host_tH)
+		is_overridden = engine.nested_scene_has_root_override(t.scene, host_tH, target_id, "rotation")
 	}
 
 	pushed := _push_override_style(is_overridden)
@@ -489,16 +496,11 @@ _draw_components_section_nested :: proc(t: ^engine.Transform, tH: engine.Transfo
 		type_name := fmt.tprintf("%v", comp_tid)
 		c_type_name := strings.clone_to_cstring(type_name, context.temp_allocator)
 
-		ns := _nested_scene_for_host(host_tH)
-		comp_has_any_override := false
-		if ns != nil {
-			for &ov in ns.overrides {
-				if ov.target == comp_base.local_id {
-					comp_has_any_override = true
-					break
-				}
-			}
-		}
+		// Per docs/NestedPrefabs.md, only root scene's overrides should color
+		// the component header. Walk up to the root NS and check if it has
+		// any override targeting this component (directly via lid for native
+		// hosts, or via a breadcrumb for deep ones).
+		comp_has_any_override := engine.nested_scene_has_any_root_override_for_target(t.scene, host_tH, comp_base.local_id)
 
 		checkbox_size := im.GetFrameHeight()
 		checkbox_pos := im.GetCursorScreenPos()
@@ -521,11 +523,22 @@ _draw_components_section_nested :: proc(t: ^engine.Transform, tH: engine.Transfo
 		im.SetCursorScreenPos(checkbox_pos)
 		enabled := comp_base.enabled
 		enabled_id := strings.clone_to_cstring(fmt.tprintf("##enabled_%v_%v", comp.handle.type_key, comp.handle.index), context.temp_allocator)
+
+		// "enabled" lives on CompData.enabled which is at base.enabled. Mark
+		// it overridden if root scene has the matching override; the field
+		// context menu uses this for revert.
+		enabled_overridden := engine.nested_scene_has_root_override(t.scene, host_tH, comp_base.local_id, "base.enabled")
+		enabled_pushed := _push_override_style(enabled_overridden)
 		if im.Checkbox(enabled_id, &enabled) {
 			e := undo.edit_begin(comp.handle, comp_tid)
 			comp_base.enabled = enabled
 			undo.edit_end(&e)
 		}
+		_pop_override_style(enabled_pushed)
+
+		prev_enabled_lid := engine.inspector_set_nested_local_id(comp_base.local_id)
+		inspector.draw_field_context_menu(&comp_base.enabled, typeid_of(bool), "base.enabled")
+		engine.inspector_set_nested_local_id(prev_enabled_lid)
 
 		_draw_component_overflow_menu(t, tH, &comp, comp_ptr, comp_tid, comp_idx, comp_count)
 

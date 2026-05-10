@@ -165,8 +165,9 @@ _scene_load_as_child :: proc(sf: ^SceneFile, parent: Transform_Handle = {}, s: ^
 				bimap_insert(&s.local_ids, lid, h)
 			}
 		}
-		for bc in sf.breadcrumbs {
+		for &bc in sf.breadcrumbs {
 			scene_breadcrumb_put(s, bc)
+			bc.scene_path = nil
 		}
 	}
 
@@ -298,6 +299,9 @@ scene_file_destroy :: proc(sf: ^SceneFile) {
 		delete(ns.overrides)
 	}
 	delete(sf.nested_scenes)
+	for &bc in sf.breadcrumbs {
+		if bc.scene_path != nil do delete(bc.scene_path)
+	}
 	delete(sf.breadcrumbs)
 	for &c in sf.cameras { type_cleanup(.Camera, &c) }
 	delete(sf.cameras)
